@@ -21,6 +21,7 @@
 - **音频提取** - 使用优化算法从缓存中提取隐藏的 OGG 音频文件
 - **网格模型提取** - 在缓存中查找 Roblox 网格模型，并将原始数据复制为连续编号的 `.mesh` 文件
 - **易读的音频文件名** - 音频使用带时长的连续编号，例如 `00001-02M-03S.ogg`
+- **完整缓存资源提取** - 导出图像、纹理、音频、网格模型、模型/场景、动画、字体、视频、脚本、元数据及无法识别的缓存内容
 - **智能分类** - 两种分类方式：
   - **按时长分类**：根据音频长度分类（需要 FFmpeg）
   - **按大小分类**：根据文件大小分类（无需 FFmpeg）
@@ -32,6 +33,12 @@
 - **多语言支持** - 完整支持中英文界面
 - **主题支持** - 深色模式、浅色模式和跟随系统主题
 - **实时进度** - 实时进度跟踪，显示速度指标和预计剩余时间
+
+### 缓存资源导出
+
+使用 **提取 → 提取所有资源** 可将识别到的资源分类导出到 `extracted_assets`（或设置的输出目录下的 `CacheAssets`）。图像、纹理、网格模型和“模型及其他资源”页面也可单独导出对应类别。导出时会去除 Roblox 的 `RBXH` 缓存封装，并保留原始资源字节。无法识别的内容会以 `.bin` 保存到 `Other`，不会被静默丢弃。`manifest.csv` 会记录编号文件对应的缓存文件和来源 URL。
+
+支持 PNG/JPEG/GIF/BMP/WebP/TIFF/AVIF/HEIC/SVG 图像、KTX/KTX2/DDS 纹理、OGG/MP3/WAV/FLAC/M4A/AAC/AIFF 音频、Roblox 网格模型、RBXM/RBXMX/RBXL/RBXLX 模型和场景、动画序列、TTF/OTF/WOFF 字体、WebM/MP4/AVI/MPEG-TS/fMP4 视频，以及 JSON/XML/HLS 元数据。视频播放列表及缓存片段会分别导出；提取器不会重建分段 HLS 视频。
 
 <p align="center">
   <img src="https://github.com/JustKanade/Roblox-Audio-Extractor/blob/main/.readme/images/GUI-Screenshot.png" alt="GUI 界面" width="600">
@@ -149,10 +156,7 @@
 ##  故障排除
 
 **问：提取器找不到任何音频文件？**  
-答：确保您指向正确的缓存目录。默认通常是：
-- Windows：`C:\Users\[用户名]\AppData\Local\Temp\Roblox\http`
-- macOS：`/Users/[用户名]/Library/Caches/Roblox/http`
-- Linux：`~/.local/share/Roblox/http`
+答：确保您指向 Roblox 缓存存储目录。较新的安装通常使用 `%TEMP%\Roblox\rbx-storage` 或 `%LOCALAPPDATA%\Roblox\rbx-storage`；较旧的安装可能使用 `%TEMP%\Roblox\http`。应用会尽量自动选择现有目录，也可以手动浏览其他缓存目录。
 
 **问：时长分类不工作？**  
 答：此功能需要 FFmpeg。确保它已安装并在系统 PATH 中可用。

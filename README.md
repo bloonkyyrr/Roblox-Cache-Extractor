@@ -28,6 +28,7 @@ English | [简体中文](README_ZH.md)
 - **Audio Extraction** - Extracts hidden OGG audio files from cache with optimized algorithms
 - **Mesh Extraction** - Finds Roblox mesh files in cache and copies the original data to numbered `.mesh` files
 - **Readable Audio Names** - Saves audio as sequential names with duration, such as `00001-02M-03S.ogg`
+- **Full Cache Asset Extraction** - Exports images, textures, audio, meshes, models/places, animations, fonts, videos, scripts, metadata, and unrecognized payloads
 - **Smart Classification** - Two classification methods:
   - **By Duration**: Categorizes audio by length (requires FFmpeg)
   - **By File Size**: Categorizes audio by file size (no FFmpeg required)
@@ -39,6 +40,12 @@ English | [简体中文](README_ZH.md)
 - **Multi-language Support** - Full support for English and Chinese interfaces
 - **Theme Support** - Dark mode, light mode, and system theme following
 - **Real-time Progress** - Live progress tracking with speed metrics and ETA
+
+### Cache asset export
+
+Use **Extract → Extract All Assets** to export recognized payloads into category folders under `extracted_assets` (or `CacheAssets` inside the configured output folder). The image, texture, mesh, and models/more screens can also export one category at a time. Roblox's `RBXH` cache envelope is removed while the original asset payload is preserved. Unknown payloads are saved as `.bin` files in `Other` so they are not silently discarded. `manifest.csv` maps each numbered export back to its cache file and source URL.
+
+Supported signatures include PNG/JPEG/GIF/BMP/WebP/TIFF/AVIF/HEIC/SVG images, KTX/KTX2/DDS textures, OGG/MP3/WAV/FLAC/M4A/AAC/AIFF audio, Roblox meshes, RBXM/RBXMX/RBXL/RBXLX models and places, animation sequences, TTF/OTF/WOFF fonts, WebM/MP4/AVI/MPEG-TS/fMP4 video, and JSON/XML/HLS metadata. Video playlist metadata and its cached segments are exported separately; the extractor does not rebuild segmented HLS videos.
 
 <p align="center">
   <img src="https://github.com/JustKanade/Roblox-Audio-Extractor/blob/main/.readme/images/GUI-Screenshot.png" alt="GUI Interface" width="600">
@@ -156,10 +163,7 @@ Settings are automatically saved in `~/.roblox_audio_extractor/config.json`:
 ##  Troubleshooting
 
 **Q: The extractor can't find any audio files?**  
-A: Make sure you're pointing to the correct cache directory. The default is usually:
-- Windows: `C:\Users\[username]\AppData\Local\Temp\Roblox\http`
-- macOS: `/Users/[username]/Library/Caches/Roblox/http`
-- Linux: `~/.local/share/Roblox/http`
+A: Make sure you're pointing to the Roblox cache store. Newer installations commonly use `%TEMP%\Roblox\rbx-storage` or `%LOCALAPPDATA%\Roblox\rbx-storage`; older installations may use `%TEMP%\Roblox\http`. The app selects an existing location when possible, and you can browse to another cache folder.
 
 **Q: Duration classification isn't working?**  
 A: This feature requires FFmpeg. Make sure it's installed and available in your system PATH.

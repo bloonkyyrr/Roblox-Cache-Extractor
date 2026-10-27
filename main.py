@@ -64,6 +64,7 @@ if hasattr(sys, '_MEIPASS'):
     os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = os.path.join(sys._MEIPASS, 'PyQt5', 'Qt', 'plugins')
 import time
 import json
+import csv
 import logging
 import threading
 import queue
@@ -72,6 +73,7 @@ import traceback
 import hashlib
 import multiprocessing
 import subprocess 
+import struct
 from functools import lru_cache
 from typing import Dict, List, Any, Set, Optional
 from enum import Enum, auto
@@ -494,35 +496,221 @@ def get_roblox_default_dir():
     """获取Roblox默认目录路径，根据不同操作系统返回不同的路径"""
     try:
         if os.name == 'nt':  # Windows
-            # 获取用户主目录
-            user_profile = os.environ.get('USERPROFILE')
-            if not user_profile:
-                # 备用方法获取用户主目录
-                import ctypes.wintypes
-                CSIDL_PROFILE = 40
-                buf = ctypes.create_unicode_buffer(ctypes.wintypes.MAX_PATH)
-                ctypes.windll.shell32.SHGetFolderPathW(0, CSIDL_PROFILE, 0, 0, buf)
-                user_profile = buf.value
-                
-            # Windows默认路径：C:\Users\用户名\AppData\Local\Roblox\rbx-storage
-            default_path = os.path.join(user_profile, "AppData", "Local", "Roblox", "rbx-storage")
-            
+            local_app_data = os.environ.get(
+                "LOCALAPPDATA", os.path.join(os.path.expanduser("~"), "AppData", "Local")
+            )
+            temp_dir = os.environ.get("TEMP", os.environ.get("TMP", os.path.join(local_app_data, "Temp")))
+            candidates = [
+                os.path.join(temp_dir, "Roblox", "rbx-storage"),
+                os.path.join(local_app_data, "Roblox", "rbx-storage"),
+                os.path.join(temp_dir, "Roblox", "http"),
+                os.path.join(local_app_data, "Roblox", "http"),
+            ]
         elif sys.platform == 'darwin':  # macOS
-            # macOS默认路径：~/Library/Roblox/rbx-storage
             user_home = os.path.expanduser("~")
-            default_path = os.path.join(user_home, "Library", "Roblox", "rbx-storage")
-            
+            temp_dir = os.environ.get("TMPDIR", "/tmp")
+            candidates = [
+                os.path.join(temp_dir, "Roblox", "rbx-storage"),
+                os.path.join(user_home, "Library", "Roblox", "rbx-storage"),
+                os.path.join(user_home, "Library", "Caches", "Roblox", "http"),
+            ]
         else:  # Linux及其他系统
-            # Linux没有官方客户端，但可以通过Wine运行Windows版本
-            # 假设Wine默认配置下的路径
             user_home = os.path.expanduser("~")
-            default_path = os.path.join(user_home, ".wine", "drive_c", "users", os.environ.get('USER', 'user'), "AppData", "Local", "Roblox", "rbx-storage")
-            
-        return default_path
+            temp_dir = os.environ.get("TMPDIR", "/tmp")
+            candidates = [
+                os.path.join(user_home, ".var", "app", "org.vinegarhq.Sober", "data", "sober", "appData", "cache", "rbx-storage"),
+                os.path.join(user_home, ".var", "app", "org.vinegarhq.Sober", "cache", "sober", "rbx-storage"),
+                os.path.join(temp_dir, "Roblox", "rbx-storage"),
+                os.path.join(temp_dir, "Roblox", "http"),
+                os.path.join(user_home, ".wine", "drive_c", "users", os.environ.get("USER", "user"), "AppData", "Local", "Roblox", "rbx-storage"),
+            ]
+
+        for candidate in candidates:
+            if os.path.isdir(candidate):
+                return candidate
+        return candidates[0]
     except Exception as e:
         # 出错时返回空字符串
         print(f"获取Roblox默认路径时出错: {e}")
         return ""
+
+
+_CACHE_ASSET_EXTENSIONS = {
+    ".png": ("Images", "png"), ".jpg": ("Images", "jpg"),
+    ".jpeg": ("Images", "jpg"), ".jfif": ("Images", "jpg"),
+    ".webp": ("Images", "webp"), ".bmp": ("Images", "bmp"),
+    ".gif": ("Images", "gif"), ".tif": ("Images", "tiff"),
+    ".tiff": ("Images", "tiff"), ".avif": ("Images", "avif"),
+    ".heic": ("Images", "heic"), ".svg": ("Images", "svg"),
+    ".ktx": ("Textures", "ktx"),
+    ".ktx2": ("Textures", "ktx2"), ".dds": ("Textures", "dds"),
+    ".ogg": ("Audio", "ogg"), ".mp3": ("Audio", "mp3"),
+    ".wav": ("Audio", "wav"), ".flac": ("Audio", "flac"),
+    ".m4a": ("Audio", "m4a"), ".aac": ("Audio", "aac"),
+    ".aiff": ("Audio", "aiff"), ".aif": ("Audio", "aiff"),
+    ".rbxm": ("Models", "rbxm"),
+    ".rbxmx": ("Models", "rbxmx"), ".rbxl": ("Models", "rbxl"),
+    ".rbxlx": ("Models", "rbxlx"), ".mesh": ("Meshes", "mesh"),
+    ".ttf": ("Fonts", "ttf"), ".otf": ("Fonts", "otf"),
+    ".woff": ("Fonts", "woff"), ".woff2": ("Fonts", "woff2"),
+    ".webm": ("Video", "webm"), ".mp4": ("Video", "mp4"),
+    ".avi": ("Video", "avi"), ".ts": ("Video", "ts"),
+    ".m4s": ("Video", "m4s"),
+    ".m3u8": ("Metadata", "m3u8"), ".json": ("Metadata", "json"),
+    ".xml": ("Metadata", "xml"), ".txt": ("Metadata", "txt"),
+    ".lua": ("Scripts", "lua"), ".luau": ("Scripts", "luau"),
+    ".zip": ("Other", "zip"), ".gz": ("Other", "gz"),
+    ".pdf": ("Other", "pdf"),
+}
+
+
+def _cache_payload_info(file_path):
+    """Return the payload offset and source URL for a raw file or RBXH cache entry."""
+    try:
+        file_size = os.path.getsize(file_path)
+        with open(file_path, "rb") as cache_file:
+            header = cache_file.read(12)
+            if header.startswith((b"HTTP/", b"HTTP ")):
+                cache_file.seek(0)
+                http_header = cache_file.read(8192)
+                separator = http_header.find(b"\r\n\r\n")
+                if separator >= 0:
+                    return separator + 4, ""
+                separator = http_header.find(b"\n\n")
+                if separator >= 0:
+                    return separator + 2, ""
+                return 0, ""
+            if header[:4] != b"RBXH" or len(header) < 12:
+                return 0, ""
+
+            version, url_length = struct.unpack_from("<II", header, 4)
+            if version > 16 or url_length > 8192:
+                return 0, ""
+
+            url_bytes = cache_file.read(url_length)
+            if len(url_bytes) != url_length:
+                return 0, ""
+            source_url = url_bytes.split(b"\x00", 1)[0].decode("utf-8", "replace")
+            metadata = cache_file.read(25)
+            payload_offset = 12 + url_length + 25
+            if len(metadata) >= 17 and payload_offset <= file_size:
+                content_length = struct.unpack_from("<I", metadata, 13)[0]
+                if content_length and file_size - payload_offset != content_length:
+                    candidate_offset = file_size - content_length
+                    if payload_offset <= candidate_offset <= file_size:
+                        payload_offset = candidate_offset
+            if payload_offset > file_size:
+                return 0, ""
+            return payload_offset, source_url
+    except OSError:
+        return 0, ""
+
+
+def _classify_cache_asset(sample, source_url=""):
+    """Classify common Roblox cache payloads by file signature and URL extension."""
+    if not sample:
+        return "Other", "bin"
+
+    head = sample[:64]
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "Images", "png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "Images", "jpg"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return "Images", "gif"
+    if head.startswith(b"BM"):
+        return "Images", "bmp"
+    if head.startswith((b"II*\x00", b"MM\x00*")):
+        return "Images", "tiff"
+    if head.startswith(b"RIFF") and len(sample) >= 12:
+        riff_type = sample[8:12]
+        if riff_type == b"WEBP":
+            return "Images", "webp"
+        if riff_type == b"WAVE":
+            return "Audio", "wav"
+        if riff_type == b"AVI ":
+            return "Video", "avi"
+    if head.startswith(b"\xabKTX 20\xbb\r\n\x1a\n"):
+        return "Textures", "ktx2"
+    if head.startswith(b"\xabKTX 11\xbb\r\n\x1a\n"):
+        return "Textures", "ktx"
+    if head.startswith(b"DDS "):
+        return "Textures", "dds"
+    if head.startswith(b"OggS"):
+        return "Audio", "ogg"
+    if head.startswith(b"fLaC"):
+        return "Audio", "flac"
+    if head.startswith(b"FORM") and sample[8:12] in (b"AIFF", b"AIFC"):
+        return "Audio", "aiff"
+    if head.startswith(b"ID3"):
+        return "Audio", "mp3"
+    if len(sample) > 1 and sample[0] == 0xff and sample[1] & 0xf6 == 0xf0:
+        return "Audio", "aac"
+    if (len(sample) > 1 and sample[0] == 0xff and sample[1] & 0xe0 == 0xe0
+            and (sample[1] >> 1) & 0x03):
+        return "Audio", "mp3"
+    if head.startswith(b"\x1aE\xdf\xa3"):
+        return "Video", "webm"
+    if len(sample) >= 376 and sample[0] == 0x47 and sample[188] == 0x47 and sample[376] == 0x47:
+        return "Video", "ts"
+    if any(sample[:32].find(box_type) >= 0 for box_type in (b"styp", b"moof")):
+        return "Video", "m4s"
+    ftyp_offset = sample[:32].find(b"ftyp")
+    if ftyp_offset >= 0 and len(sample) >= ftyp_offset + 8:
+        major_brand = sample[ftyp_offset + 4:ftyp_offset + 8].lower()
+        url_ext = os.path.splitext(source_url.split("?", 1)[0])[1].lower()
+        if major_brand.startswith((b"m4a", b"m4b")) or url_ext in (".m4a", ".m4b"):
+            return "Audio", url_ext[1:] if url_ext in (".m4a", ".m4b") else major_brand[:3].decode("ascii")
+        if major_brand.startswith((b"avif", b"avis")):
+            return "Images", "avif"
+        if major_brand.startswith((b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1")):
+            return "Images", "heic"
+        return "Video", "mp4"
+    if head.startswith((b"\x00\x01\x00\x00", b"OTTO", b"true", b"ttcf")):
+        return "Fonts", "otf" if head.startswith(b"OTTO") else "ttf"
+    if head.startswith(b"wOFF"):
+        return "Fonts", "woff"
+    if head.startswith(b"wOF2"):
+        return "Fonts", "woff2"
+    if head.startswith(b"version "):
+        return "Meshes", "mesh"
+    if sample.startswith(b"<roblox!"):
+        model_extension = os.path.splitext(source_url.split("?", 1)[0])[1].lower()
+        model_extension = model_extension if model_extension in (".rbxm", ".rbxl") else ".rbxm"
+        model_extension = model_extension[1:]
+        if any(marker in sample[:1_000_000] for marker in (b"KeyframeSequence", b"CurveAnimation", b"AnimationClip")):
+            return "Animations", model_extension
+        return "Models", model_extension
+
+    text_sample = sample.lstrip(b"\xef\xbb\xbf \t\r\n")
+    if b"<roblox" in text_sample[:8192]:
+        model_extension = os.path.splitext(source_url.split("?", 1)[0])[1].lower()
+        model_extension = model_extension if model_extension in (".rbxmx", ".rbxlx") else ".rbxmx"
+        model_extension = model_extension[1:]
+        if any(marker in sample[:1_000_000] for marker in (b"KeyframeSequence", b"CurveAnimation", b"AnimationClip")):
+            return "Animations", model_extension
+        return "Models", model_extension
+    if text_sample.startswith(b"#EXTM3U"):
+        return "Metadata", "m3u8"
+    if text_sample.startswith((b"{", b"[")):
+        return "Metadata", "json"
+    if text_sample.startswith(b"<svg") or b"<svg" in text_sample[:8192]:
+        return "Images", "svg"
+    if text_sample.startswith(b"<?xml"):
+        return "Metadata", "xml"
+    if head.startswith(b"%PDF"):
+        return "Other", "pdf"
+    if head.startswith(b"PK\x03\x04"):
+        return "Other", "zip"
+    if head.startswith(b"\x1f\x8b"):
+        return "Other", "gz"
+
+    url_extension = os.path.splitext(source_url.split("?", 1)[0])[1].lower()
+    if url_extension in _CACHE_ASSET_EXTENSIONS:
+        return _CACHE_ASSET_EXTENSIONS[url_extension]
+    if text_sample and sum(byte in b"\t\n\r" or 32 <= byte <= 126 for byte in text_sample[:1024]) / min(len(text_sample), 1024) > 0.9:
+        return "Metadata", "txt"
+    return "Other", "bin"
 
 
 class Language(Enum):
@@ -605,6 +793,58 @@ class LanguageManager:
             "extract_meshes": {
                 self.ENGLISH: "Extract Meshes",
                 self.CHINESE: "提取网格模型"
+            },
+            "extract_other_assets": {
+                self.ENGLISH: "Extract Models & More",
+                self.CHINESE: "提取模型及其他资源"
+            },
+            "extract_all_assets": {
+                self.ENGLISH: "Extract All Assets",
+                self.CHINESE: "提取所有资源"
+            },
+            "asset_extract_description": {
+                self.ENGLISH: "Scan Roblox cache payloads and export supported images, textures, sounds, videos, models, animations, fonts, metadata, and unrecognized data. Cache wrappers are removed; original payload bytes are kept.",
+                self.CHINESE: "扫描 Roblox 缓存内容并导出图像、纹理、音频、视频、模型、动画、字体、元数据及无法识别的数据。会去除缓存封装并保留资源原始字节。"
+            },
+            "other_asset_extract_description": {
+                self.ENGLISH: "Extract Roblox models and places, animation sequences, fonts, cached videos, translation and playlist metadata, plus unrecognized payloads.",
+                self.CHINESE: "提取 Roblox 模型和场景、动画序列、字体、缓存视频、翻译和播放列表元数据，以及无法识别的数据。"
+            },
+            "image_extract_description": {
+                self.ENGLISH: "Find and export cached PNG, JPEG, GIF, BMP, and WebP images, including thumbnails.",
+                self.CHINESE: "查找并导出缓存中的 PNG、JPEG、GIF、BMP 和 WebP 图像，包括缩略图。"
+            },
+            "texture_extract_description": {
+                self.ENGLISH: "Find and export cached KTX, KTX2, and DDS texture payloads without changing their bytes.",
+                self.CHINESE: "查找并导出缓存中的 KTX、KTX2 和 DDS 纹理，并保留原始字节。"
+            },
+            "asset_scanning": {
+                self.ENGLISH: "Scanning cache payloads...",
+                self.CHINESE: "正在扫描缓存资源..."
+            },
+            "asset_found": {
+                self.ENGLISH: "Found {} matching cache assets.",
+                self.CHINESE: "找到 {} 个匹配的缓存资源。"
+            },
+            "asset_extraction_complete": {
+                self.ENGLISH: "Extracted {} assets to {}.",
+                self.CHINESE: "已提取 {} 个资源到 {}。"
+            },
+            "asset_copy_errors": {
+                self.ENGLISH: "Could not export {} assets.",
+                self.CHINESE: "有 {} 个资源导出失败。"
+            },
+            "asset_no_files_found": {
+                self.ENGLISH: "No matching cache assets were found.",
+                self.CHINESE: "未找到匹配的缓存资源。"
+            },
+            "asset_progress": {
+                self.ENGLISH: "{} / {} assets",
+                self.CHINESE: "{} / {} 个资源"
+            },
+            "asset_output_directory": {
+                self.ENGLISH: "Output directory: {}",
+                self.CHINESE: "输出目录：{}"
             },
             "mesh_extract_description": {
                 self.ENGLISH: "Scan Roblox cache files for mesh headers and copy matching files as .mesh. The original mesh data is preserved; this does not convert meshes to OBJ.",
@@ -1909,6 +2149,7 @@ class RobloxAudioExtractor:
         output_path_norm = os.path.normpath(self.output_dir)
         audio_path_norm = os.path.normpath(self.audio_dir)
         mesh_output_path_norm = os.path.normpath(os.path.join(self.base_dir, "extracted_meshes"))
+        asset_output_path_norm = os.path.normpath(os.path.join(self.base_dir, "extracted_assets"))
 
         def scan_directory(dir_path):
             """递归扫描目录"""
@@ -1921,7 +2162,8 @@ class RobloxAudioExtractor:
                             entry_path_norm = os.path.normpath(entry.path)
                             if (output_path_norm not in entry_path_norm and 
                                 audio_path_norm not in entry_path_norm and
-                                mesh_output_path_norm not in entry_path_norm):
+                                mesh_output_path_norm not in entry_path_norm and
+                                asset_output_path_norm not in entry_path_norm):
                                 scan_directory(entry.path)
                         elif entry.is_file():
                             # 如果文件名中不包含关键字且不以.ogg结尾
@@ -2444,18 +2686,25 @@ class MeshExtractionWorker(QThread):
         self.is_cancelled = False
 
     @staticmethod
-    def _is_mesh_file(file_path):
-        """Identify a Roblox mesh from its ASCII `version X.XX` header."""
+    def _mesh_payload_offset(file_path):
+        """Return the raw mesh header offset, including when wrapped in RBXH."""
+        payload_offset, _ = _cache_payload_info(file_path)
         try:
             with open(file_path, "rb") as mesh_file:
-                header = mesh_file.read(12)
-            if len(header) < 12 or header[:8] != b"version ":
-                return False
+                mesh_file.seek(payload_offset)
+                sample = mesh_file.read(64)
+            magic_offset = sample.find(b"version ")
+            if magic_offset < 0:
+                return None
+            header = sample[magic_offset:magic_offset + 12]
+            if len(header) < 12:
+                return None
             version = header[8:12]
-            return (version[:1].isdigit() and version[1:2] == b"." and
-                    version[2:].isdigit())
+            if version[:1].isdigit() and version[1:2] == b"." and version[2:].isdigit():
+                return payload_offset + magic_offset
+            return None
         except OSError:
-            return False
+            return None
 
     @staticmethod
     def _is_inside(path, parent):
@@ -2503,14 +2752,18 @@ class MeshExtractionWorker(QThread):
                     break
                 dirs[:] = sorted(
                     directory for directory in dirs
-                    if not self._is_inside(os.path.join(root, directory), output_exclusion)
+                    if directory.lower() not in {"extracted_oggs", "extracted_meshes", "extracted_assets"}
+                    and not self._is_inside(os.path.join(root, directory), output_exclusion)
                 )
                 for name in sorted(files):
                     if self.is_cancelled:
                         break
                     source_path = os.path.join(root, name)
-                    if not self._is_inside(source_path, output_exclusion) and self._is_mesh_file(source_path):
-                        mesh_files.append(source_path)
+                    if self._is_inside(source_path, output_exclusion):
+                        continue
+                    payload_offset = self._mesh_payload_offset(source_path)
+                    if payload_offset is not None:
+                        mesh_files.append((source_path, payload_offset))
 
             self.logMessage.emit(lang.get("mesh_found", len(mesh_files)), "info")
             if not mesh_files:
@@ -2527,7 +2780,7 @@ class MeshExtractionWorker(QThread):
             sequence_number = self._next_sequence_number(output_dir)
             processed = 0
             errors = 0
-            for index, source_path in enumerate(mesh_files, start=1):
+            for index, (source_path, payload_offset) in enumerate(mesh_files, start=1):
                 if self.is_cancelled:
                     break
 
@@ -2538,7 +2791,9 @@ class MeshExtractionWorker(QThread):
                         break
 
                 try:
-                    file_shutil.copy2(source_path, output_path)
+                    with open(source_path, "rb") as source_file, open(output_path, "wb") as output_file:
+                        source_file.seek(payload_offset)
+                        file_shutil.copyfileobj(source_file, output_file, length=1024 * 1024)
                     processed += 1
                 except OSError as error:
                     errors += 1
@@ -2549,6 +2804,201 @@ class MeshExtractionWorker(QThread):
             self.finished.emit({
                 "success": True,
                 "found": len(mesh_files),
+                "processed": processed,
+                "errors": errors,
+                "output_dir": output_dir,
+                "cancelled": self.is_cancelled,
+            })
+        except Exception as error:
+            self.finished.emit({"success": False, "error": str(error)})
+
+    def cancel(self):
+        self.is_cancelled = True
+
+
+class CacheAssetExtractionWorker(QThread):
+    """Extract common and unrecognized Roblox cache payloads without RBXH wrappers."""
+    progressUpdated = pyqtSignal(int, int)
+    finished = pyqtSignal(dict)
+    logMessage = pyqtSignal(str, str)
+
+    EXCLUDED_DIRECTORY_NAMES = {
+        "extracted_oggs", "extracted_meshes", "extracted_assets", "cacheassets"
+    }
+    EXCLUDED_FILE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".sqlite", ".sqlite3")
+
+    def __init__(self, directory, custom_output_dir=None, categories=None, language_manager=None):
+        super().__init__()
+        self.directory = os.path.abspath(directory)
+        self.custom_output_dir = custom_output_dir
+        self.categories = set(categories) if categories else None
+        self.language_manager = language_manager
+        self.is_cancelled = False
+
+    def _text(self, key, *args):
+        if self.language_manager:
+            return self.language_manager.get(key, *args)
+        return key.format(*args) if args else key
+
+    def _get_output_dir(self):
+        if self.custom_output_dir and os.path.isdir(self.custom_output_dir):
+            return os.path.join(os.path.abspath(self.custom_output_dir), "CacheAssets")
+        return os.path.join(self.directory, "extracted_assets")
+
+    @staticmethod
+    def _next_sequence_number(output_dir):
+        highest_number = 0
+        for root, _, files in os.walk(output_dir):
+            for name in files:
+                prefix = name.split("-", 1)[0].split(".", 1)[0]
+                if prefix.isdigit():
+                    highest_number = max(highest_number, int(prefix))
+        return highest_number + 1
+
+    @staticmethod
+    def _audio_duration(file_path):
+        try:
+            import subprocess as process
+            result = process.run(
+                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", file_path],
+                stdout=process.PIPE,
+                stderr=process.PIPE,
+                creationflags=getattr(process, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+                text=True,
+                timeout=15,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return max(0.0, float(result.stdout.strip()))
+        except Exception:
+            pass
+        return 0.0
+
+    def _scan_assets(self, output_dir):
+        output_dir = os.path.abspath(output_dir)
+        output_exclusion = os.path.dirname(output_dir)
+        if os.path.normcase(output_exclusion) == os.path.normcase(self.directory):
+            output_exclusion = output_dir
+
+        assets = []
+        for root, dirs, files in os.walk(self.directory):
+            if self.is_cancelled:
+                break
+            dirs[:] = sorted(
+                folder for folder in dirs
+                if folder.lower() not in self.EXCLUDED_DIRECTORY_NAMES
+                and not MeshExtractionWorker._is_inside(os.path.join(root, folder), output_exclusion)
+            )
+            for name in sorted(files):
+                if self.is_cancelled:
+                    break
+                if name.lower().endswith(self.EXCLUDED_FILE_SUFFIXES) or name.lower() in {
+                    "rbx-storage.id", "shadercache.bin", "shadercachevk.bin"
+                }:
+                    continue
+                source_path = os.path.join(root, name)
+                if MeshExtractionWorker._is_inside(source_path, output_exclusion):
+                    continue
+                payload_offset, source_url = _cache_payload_info(source_path)
+                try:
+                    with open(source_path, "rb") as source_file:
+                        source_file.seek(payload_offset)
+                        sample = source_file.read(8192)
+                        if sample.startswith(b"<roblox!") or b"<roblox" in sample[:8192]:
+                            sample += source_file.read(max(0, 1_000_000 - len(sample)))
+                except OSError:
+                    continue
+                if not sample:
+                    continue
+                category, extension = _classify_cache_asset(sample, source_url)
+                if self.categories is None or category in self.categories:
+                    assets.append((source_path, payload_offset, source_url, category, extension))
+        return assets
+
+    def run(self):
+        try:
+            if not os.path.isdir(self.directory):
+                raise FileNotFoundError(f"Input directory does not exist: {self.directory}")
+
+            output_dir = self._get_output_dir()
+            os.makedirs(output_dir, exist_ok=True)
+            import shutil as file_shutil
+            self.logMessage.emit(self._text("asset_scanning"), "info")
+            assets = self._scan_assets(output_dir)
+            self.logMessage.emit(self._text("asset_found", len(assets)), "info")
+            if not assets:
+                self.finished.emit({
+                    "success": True,
+                    "found": 0,
+                    "processed": 0,
+                    "errors": 0,
+                    "output_dir": output_dir,
+                    "cancelled": self.is_cancelled,
+                })
+                return
+
+            sequence_number = self._next_sequence_number(output_dir)
+            processed = 0
+            errors = 0
+            for index, (source_path, payload_offset, source_url, category, extension) in enumerate(assets, start=1):
+                if self.is_cancelled:
+                    break
+
+                category_dir = os.path.join(output_dir, category)
+                os.makedirs(category_dir, exist_ok=True)
+                temporary_path = os.path.join(category_dir, f".extract-{sequence_number:05d}.tmp.{extension}")
+                try:
+                    with open(source_path, "rb") as source_file, open(temporary_path, "wb") as output_file:
+                        source_file.seek(payload_offset)
+                        file_shutil.copyfileobj(source_file, output_file, length=1024 * 1024)
+
+                    if category == "Audio":
+                        duration = int(round(self._audio_duration(temporary_path)))
+                        minutes, seconds = divmod(duration, 60)
+                        output_name = f"{sequence_number:05d}-{minutes:02d}M-{seconds:02d}S.{extension}"
+                    else:
+                        output_name = f"{sequence_number:05d}.{extension}"
+                    output_path = os.path.join(category_dir, output_name)
+                    while os.path.exists(output_path):
+                        sequence_number += 1
+                        if category == "Audio":
+                            output_name = f"{sequence_number:05d}-{minutes:02d}M-{seconds:02d}S.{extension}"
+                        else:
+                            output_name = f"{sequence_number:05d}.{extension}"
+                        output_path = os.path.join(category_dir, output_name)
+                    os.replace(temporary_path, output_path)
+                    processed += 1
+                    try:
+                        manifest_path = os.path.join(output_dir, "manifest.csv")
+                        write_manifest_header = not os.path.exists(manifest_path) or os.path.getsize(manifest_path) == 0
+                        with open(manifest_path, "a", newline="", encoding="utf-8") as manifest_file:
+                            writer = csv.writer(manifest_file)
+                            if write_manifest_header:
+                                writer.writerow(("sequence", "category", "exported_file", "source_cache_file", "source_url"))
+                            writer.writerow((
+                                sequence_number,
+                                category,
+                                os.path.relpath(output_path, output_dir),
+                                os.path.relpath(source_path, self.directory),
+                                source_url,
+                            ))
+                    except OSError as manifest_error:
+                        self.logMessage.emit(f"Could not update asset manifest: {manifest_error}", "warning")
+                except OSError as error:
+                    errors += 1
+                    self.logMessage.emit(f"{source_path}: {error}", "error")
+                    try:
+                        if os.path.exists(temporary_path):
+                            os.remove(temporary_path)
+                    except OSError:
+                        pass
+                finally:
+                    sequence_number += 1
+                    self.progressUpdated.emit(index, len(assets))
+
+            self.finished.emit({
+                "success": True,
+                "found": len(assets),
                 "processed": processed,
                 "errors": errors,
                 "output_dir": output_dir,
@@ -2580,13 +3030,13 @@ class CacheClearWorker(QThread):
             processed_files = 0
 
             # 需要排除的文件夹
-            exclude_dirs = {'extracted_oggs', 'extracted_meshes'}
+            exclude_dirs = {'extracted_oggs', 'extracted_meshes', 'extracted_assets', 'cacheassets'}
             files_to_process = []
 
             # 首先扫描所有文件
             for root, dirs, files in os.walk(self.directory):
                 # 跳过排除的目录
-                if any(excluded in root for excluded in exclude_dirs):
+                if any(excluded in root.lower() for excluded in exclude_dirs):
                     continue
 
                 for file in files:
@@ -2701,6 +3151,8 @@ class MainWindow(FluentWindow):
         self.extraction_worker = None
         self.cache_clear_worker = None
         self.mesh_extraction_worker = None
+        self.asset_extraction_workers = {}
+        self.asset_extraction_ui = {}
         
         # 初始化UI
         self.initUI()
@@ -2827,6 +3279,12 @@ class MainWindow(FluentWindow):
         self.extractMeshesInterface = QWidget()
         self.extractMeshesInterface.setObjectName("extractMeshesInterface")
 
+        self.extractOtherAssetsInterface = QWidget()
+        self.extractOtherAssetsInterface.setObjectName("extractOtherAssetsInterface")
+
+        self.extractAllAssetsInterface = QWidget()
+        self.extractAllAssetsInterface.setObjectName("extractAllAssetsInterface")
+
         self.clearCacheInterface = QWidget()
         self.clearCacheInterface.setObjectName("clearCacheInterface")
 
@@ -2870,6 +3328,8 @@ class MainWindow(FluentWindow):
         self.stackedWidget.addWidget(self.extractImagesInterface)
         self.stackedWidget.addWidget(self.extractTexturesInterface)
         self.stackedWidget.addWidget(self.extractMeshesInterface)
+        self.stackedWidget.addWidget(self.extractOtherAssetsInterface)
+        self.stackedWidget.addWidget(self.extractAllAssetsInterface)
         
         self.navigationInterface.addItem(
             routeKey=self.extractImagesInterface.objectName(),
@@ -2896,6 +3356,26 @@ class MainWindow(FluentWindow):
             icon=FluentIcon.VIEW,
             text=lang.get("extract_meshes"),
             onClick=lambda: self.switchTo(self.extractMeshesInterface),
+            selectable=True,
+            position=NavigationItemPosition.TOP,
+            parentRouteKey="extract"
+        )
+
+        self.navigationInterface.addItem(
+            routeKey=self.extractOtherAssetsInterface.objectName(),
+            icon=FluentIcon.DOCUMENT,
+            text=lang.get("extract_other_assets"),
+            onClick=lambda: self.switchTo(self.extractOtherAssetsInterface),
+            selectable=True,
+            position=NavigationItemPosition.TOP,
+            parentRouteKey="extract"
+        )
+
+        self.navigationInterface.addItem(
+            routeKey=self.extractAllAssetsInterface.objectName(),
+            icon=FluentIcon.DOWNLOAD,
+            text=lang.get("extract_all_assets"),
+            onClick=lambda: self.switchTo(self.extractAllAssetsInterface),
             selectable=True,
             position=NavigationItemPosition.TOP,
             parentRouteKey="extract"
@@ -2937,6 +3417,8 @@ class MainWindow(FluentWindow):
         self.setupExtractImagesInterface()
         self.setupExtractTexturesInterface()
         self.setupExtractMeshesInterface()
+        self.setupExtractOtherAssetsInterface()
+        self.setupExtractAllAssetsInterface()
         self.setupClearCacheInterface()
         self.setupHistoryInterface()
         self.setupSettingsInterface()
@@ -3500,77 +3982,139 @@ class MainWindow(FluentWindow):
         self.extractLogHandler = LogHandler(self.extractLogText)
 
     def setupExtractImagesInterface(self):
-        """设置图像提取界面"""
-        # 创建滚动区域
-        scroll = ScrollArea(self.extractImagesInterface)
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-
-        # 主内容容器
-        content_widget = QWidget()
-        content_layout = QVBoxLayout(content_widget)
-        content_layout.setContentsMargins(30, 30, 30, 30)
-        content_layout.setSpacing(20)
-
-        # 添加占位内容
-        placeholder = CardWidget()
-        placeholder_layout = QVBoxLayout(placeholder)
-        placeholder_layout.setContentsMargins(20, 20, 20, 20)
-        
-        title = SubtitleLabel("提取图像")
-        title.setObjectName("extractImagesTitle")
-        placeholder_layout.addWidget(title)
-        
-        desc = BodyLabel("这是提取图像的功能界面占位符，将在后续版本中实现。")
-        desc.setWordWrap(True)
-        placeholder_layout.addWidget(desc)
-        
-        content_layout.addWidget(placeholder)
-        scroll.setWidget(content_widget)
-        
-        # 创建布局
-        layout = QVBoxLayout(self.extractImagesInterface)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(scroll)
-        
-        # 设置为响应式
-        self.setResponsiveContentWidget(scroll)
+        self._setupCacheAssetInterface(
+            self.extractImagesInterface,
+            lang.get("extract_images"),
+            {"Images"},
+            lang.get("image_extract_description"),
+        )
 
     def setupExtractTexturesInterface(self):
-        """设置纹理提取界面"""
-        # 创建滚动区域
-        scroll = ScrollArea(self.extractTexturesInterface)
+        self._setupCacheAssetInterface(
+            self.extractTexturesInterface,
+            lang.get("extract_textures"),
+            {"Textures"},
+            lang.get("texture_extract_description"),
+        )
+
+    def setupExtractOtherAssetsInterface(self):
+        categories = {"Animations", "Models", "Scripts", "Fonts", "Video", "Metadata", "Other"}
+        self._setupCacheAssetInterface(
+            self.extractOtherAssetsInterface,
+            lang.get("extract_other_assets"),
+            categories,
+            lang.get("other_asset_extract_description"),
+        )
+
+    def setupExtractAllAssetsInterface(self):
+        self._setupCacheAssetInterface(
+            self.extractAllAssetsInterface,
+            lang.get("extract_all_assets"),
+            None,
+            lang.get("asset_extract_description"),
+        )
+
+    def _setupCacheAssetInterface(self, interface, title_text, categories, description_text):
+        """Create a shared scan/export page for a cache asset category."""
+        page_key = interface.objectName()
+        scroll = ScrollArea(interface)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        # 主内容容器
         content_widget = QWidget()
         content_layout = QVBoxLayout(content_widget)
         content_layout.setContentsMargins(30, 30, 30, 30)
         content_layout.setSpacing(20)
 
-        # 添加占位内容
-        placeholder = CardWidget()
-        placeholder_layout = QVBoxLayout(placeholder)
-        placeholder_layout.setContentsMargins(20, 20, 20, 20)
-        
-        title = SubtitleLabel("提取纹理")
-        title.setObjectName("extractTexturesTitle")
-        placeholder_layout.addWidget(title)
-        
-        desc = BodyLabel("这是提取纹理的功能界面占位符，将在后续版本中实现。")
-        desc.setWordWrap(True)
-        placeholder_layout.addWidget(desc)
-        
-        content_layout.addWidget(placeholder)
+        source_card = CardWidget()
+        source_layout = QVBoxLayout(source_card)
+        source_layout.setContentsMargins(20, 15, 20, 15)
+        source_layout.setSpacing(12)
+        source_layout.addWidget(TitleLabel(title_text))
+        description = BodyLabel(description_text)
+        description.setWordWrap(True)
+        source_layout.addWidget(description)
+
+        directory_row = QHBoxLayout()
+        directory_input = LineEdit()
+        directory_input.setText(self.config_manager.get("global_input_path", "") or self.default_dir)
+        directory_input.setPlaceholderText(lang.get("input_dir"))
+        directory_input.setClearButtonEnabled(True)
+        directory_input.textChanged.connect(
+            lambda path, key=page_key: self.updateCacheAssetOutputHint(key, path)
+        )
+        browse_button = PushButton(FluentIcon.FOLDER_ADD, lang.get("browse"))
+        browse_button.setFixedSize(100, 33)
+        browse_button.clicked.connect(
+            lambda checked=False, key=page_key: self.browseCacheAssetDirectory(key)
+        )
+        directory_row.addWidget(directory_input, 1)
+        directory_row.addWidget(browse_button)
+        source_layout.addLayout(directory_row)
+
+        output_hint = CaptionLabel()
+        output_hint.setWordWrap(True)
+        source_layout.addWidget(output_hint)
+        content_layout.addWidget(source_card)
+
+        control_card = CardWidget()
+        control_layout = QVBoxLayout(control_card)
+        control_layout.setContentsMargins(20, 15, 20, 15)
+        control_layout.setSpacing(12)
+        progress = ProgressBar()
+        progress.setValue(0)
+        progress.setTextVisible(True)
+        progress_label = CaptionLabel(lang.get("ready"))
+        progress_label.setAlignment(Qt.AlignCenter)
+        control_layout.addWidget(progress)
+        control_layout.addWidget(progress_label)
+
+        buttons = QHBoxLayout()
+        start_button = PrimaryPushButton(FluentIcon.DOWNLOAD, lang.get("start_extraction"))
+        start_button.setFixedHeight(40)
+        start_button.clicked.connect(
+            lambda checked=False, key=page_key: self.startCacheAssetExtraction(key)
+        )
+        cancel_button = PushButton(FluentIcon.CLOSE, lang.get("cancel"))
+        cancel_button.setFixedHeight(40)
+        cancel_button.clicked.connect(
+            lambda checked=False, key=page_key: self.cancelCacheAssetExtraction(key)
+        )
+        cancel_button.hide()
+        buttons.addWidget(start_button)
+        buttons.addWidget(cancel_button)
+        buttons.addStretch()
+        control_layout.addLayout(buttons)
+        content_layout.addWidget(control_card)
+
+        log_card = CardWidget()
+        log_card.setFixedHeight(280)
+        log_layout = QVBoxLayout(log_card)
+        log_layout.setContentsMargins(20, 10, 20, 15)
+        log_layout.setSpacing(10)
+        log_layout.addWidget(StrongBodyLabel(lang.get("recent_activity")))
+        log_text = TextEdit()
+        log_text.setReadOnly(True)
+        log_text.setFixedHeight(200)
+        log_layout.addWidget(log_text)
+        content_layout.addWidget(log_card)
+
         scroll.setWidget(content_widget)
-        
-        # 创建布局
-        layout = QVBoxLayout(self.extractTexturesInterface)
+        layout = QVBoxLayout(interface)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(scroll)
-        
-        # 设置为响应式
+
+        self.asset_extraction_ui[page_key] = {
+            "input": directory_input,
+            "output_hint": output_hint,
+            "categories": categories,
+            "progress": progress,
+            "progress_label": progress_label,
+            "start": start_button,
+            "cancel": cancel_button,
+            "log": LogHandler(log_text),
+        }
+        self.updateCacheAssetOutputHint(page_key, directory_input.text())
         self.setResponsiveContentWidget(scroll)
 
     def setupExtractMeshesInterface(self):
@@ -3596,7 +4140,7 @@ class MainWindow(FluentWindow):
 
         directory_row = QHBoxLayout()
         self.meshDirInput = LineEdit()
-        self.meshDirInput.setText(self.default_dir)
+        self.meshDirInput.setText(self.config_manager.get("global_input_path", "") or self.default_dir)
         self.meshDirInput.setPlaceholderText(lang.get("input_dir"))
         self.meshDirInput.setClearButtonEnabled(True)
         self.meshDirInput.textChanged.connect(self.updateMeshOutputHint)
@@ -4692,6 +5236,131 @@ class MainWindow(FluentWindow):
             self.dirInput.setText(directory)
             self.config_manager.set("last_directory", directory)
 
+    def browseCacheAssetDirectory(self, page_key):
+        ui = self.asset_extraction_ui.get(page_key)
+        if not ui:
+            return
+        directory = QFileDialog.getExistingDirectory(
+            self, lang.get("directory"), ui["input"].text()
+        )
+        if directory:
+            ui["input"].setText(directory)
+
+    def updateCacheAssetOutputHint(self, page_key, input_directory):
+        ui = self.asset_extraction_ui.get(page_key)
+        if not ui:
+            return
+        custom_output_dir = self.config_manager.get("custom_output_dir", "")
+        if custom_output_dir and os.path.isdir(custom_output_dir):
+            output_dir = os.path.join(os.path.abspath(custom_output_dir), "CacheAssets")
+        else:
+            output_dir = os.path.join(os.path.abspath(input_directory or "."), "extracted_assets")
+        ui["output_hint"].setText(lang.get("asset_output_directory", output_dir))
+
+    def startCacheAssetExtraction(self, page_key):
+        ui = self.asset_extraction_ui.get(page_key)
+        if not ui:
+            return
+        if any(worker.isRunning() for worker in self.asset_extraction_workers.values()):
+            ui["log"].warning(lang.get("task_running"))
+            return
+
+        global_input_path = self.config_manager.get("global_input_path", "")
+        selected_dir = global_input_path or ui["input"].text().strip()
+        if global_input_path and ui["input"].text() != global_input_path:
+            ui["input"].setText(global_input_path)
+        self.updateCacheAssetOutputHint(page_key, selected_dir)
+        if not os.path.isdir(selected_dir):
+            message = lang.get("dir_not_exist", selected_dir)
+            ui["log"].error(message)
+            InfoBar.error(
+                title=lang.get("task_failed"),
+                content=message,
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=5000,
+                parent=self,
+            )
+            return
+
+        worker = CacheAssetExtractionWorker(
+            selected_dir,
+            self.config_manager.get("custom_output_dir", ""),
+            ui["categories"],
+            lang,
+        )
+        self.asset_extraction_workers[page_key] = worker
+        worker.progressUpdated.connect(
+            lambda current, total, key=page_key: self.updateCacheAssetProgress(key, current, total)
+        )
+        worker.finished.connect(
+            lambda result, key=page_key: self.cacheAssetExtractionFinished(key, result)
+        )
+        worker.logMessage.connect(
+            lambda message, kind, key=page_key: self.handleCacheAssetLog(key, message, kind)
+        )
+        ui["start"].hide()
+        ui["cancel"].show()
+        ui["progress"].setValue(0)
+        ui["progress_label"].setText(lang.get("processing"))
+        worker.start()
+
+    def cancelCacheAssetExtraction(self, page_key):
+        worker = self.asset_extraction_workers.get(page_key)
+        if worker and worker.isRunning():
+            worker.cancel()
+            self.asset_extraction_ui[page_key]["log"].warning(lang.get("canceled_by_user"))
+
+    def updateCacheAssetProgress(self, page_key, current, total):
+        ui = self.asset_extraction_ui.get(page_key)
+        if not ui:
+            return
+        progress = min(100, int((current / total) * 100)) if total else 0
+        ui["progress"].setValue(progress)
+        ui["progress_label"].setText(lang.get("asset_progress", current, total))
+
+    def handleCacheAssetLog(self, page_key, message, msg_type="info"):
+        ui = self.asset_extraction_ui.get(page_key)
+        if not ui:
+            return
+        if msg_type == "success":
+            ui["log"].success(message)
+        elif msg_type == "warning":
+            ui["log"].warning(message)
+        elif msg_type == "error":
+            ui["log"].error(message)
+        else:
+            ui["log"].info(message)
+
+    def cacheAssetExtractionFinished(self, page_key, result):
+        ui = self.asset_extraction_ui.get(page_key)
+        if not ui:
+            return
+        ui["cancel"].hide()
+        ui["start"].show()
+        ui["progress"].setValue(0)
+        ui["progress_label"].setText(lang.get("ready"))
+        if not result.get("success", False):
+            error = result.get("error", "Unknown error")
+            ui["log"].error(error)
+            return
+
+        processed = result.get("processed", 0)
+        found = result.get("found", 0)
+        errors = result.get("errors", 0)
+        output_dir = result.get("output_dir", "")
+        if processed:
+            ui["log"].success(lang.get("asset_extraction_complete", processed, output_dir))
+            if self.config_manager.get("auto_open_output_dir", True) and os.path.isdir(output_dir):
+                open_directory(output_dir)
+        if errors:
+            ui["log"].warning(lang.get("asset_copy_errors", errors))
+        if not found and not result.get("cancelled", False):
+            ui["log"].warning(lang.get("asset_no_files_found"))
+        elif result.get("cancelled", False):
+            ui["log"].warning(lang.get("canceled_by_user"))
+
     def browseMeshDirectory(self):
         """Choose the cache folder to scan for Roblox meshes."""
         directory = QFileDialog.getExistingDirectory(
@@ -5532,6 +6201,10 @@ class MainWindow(FluentWindow):
         # 更新提取界面的输入路径框
         if hasattr(self, 'dirInput') and self.dirInput:
             self.dirInput.setText(path)
+        if hasattr(self, 'meshDirInput') and self.meshDirInput:
+            self.meshDirInput.setText(path)
+        for asset_ui in getattr(self, "asset_extraction_ui", {}).values():
+            asset_ui["input"].setText(path)
             
         # 显示成功消息
         if hasattr(self, 'settingsLogHandler') and self.settingsLogHandler:
