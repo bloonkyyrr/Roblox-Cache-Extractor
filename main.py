@@ -74,21 +74,11 @@ import hashlib
 import multiprocessing
 import subprocess 
 import struct
-import zlib
 from functools import lru_cache
 from typing import Dict, List, Any, Set, Optional
 from enum import Enum, auto
 
-try:
-    import texture2ddecoder
-except ImportError:
-    texture2ddecoder = None
-
-try:
-    import zstandard
-except ImportError:
-    zstandard = None
-
+from src.ktx2_png import convert_ktx2_to_png as _convert_ktx2_to_png
 
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,QButtonGroup,
@@ -724,150 +714,6 @@ def _classify_cache_asset(sample, source_url=""):
     return "Other", "bin"
 
 
-def _convert_ktx2_to_png(input_path, output_path):
-    """Decode the base image from supported KTX2 textures into PNG."""
-    if texture2ddecoder is None:
-        return False, "texture2ddecoder is not installed; install the project requirements"
-
-    try:
-        file_size = os.path.getsize(input_path)
-        with open(input_path, "rb") as texture_file:
-            header = texture_file.read(80)
-            if len(header) < 80 or header[:12] != b"\xabKTX 20\xbb\r\n\x1a\n":
-                return False, "invalid KTX2 header"
-
-            fields = struct.unpack_from("<13I2Q", header, 12)
-            (vk_format, type_size, width, height, depth, layer_count, face_count,
-             level_count, supercompression, dfd_offset, dfd_length, kvd_offset,
-             kvd_length, sgd_offset, sgd_length) = fields
-            if not width or not height or width > 32768 or height > 32768:
-                return False, "unsupported or invalid image dimensions"
-            if width * height > 64 * 1024 * 1024:
-                return False, "KTX2 image is too large to decode safely"
-            if depth > 1 or face_count not in (1, 6):
-                return False, "only 2D KTX2 images are supported"
-            level_count = max(1, level_count)
-            if level_count > 32 or 80 + level_count * 24 > file_size:
-                return False, "KTX2 mip level index is invalid"
-
-            level_index_offset = 80
-            texture_file.seek(level_index_offset)
-            level_index = texture_file.read(24)
-            if len(level_index) != 24:
-                return False, "KTX2 mip level index is incomplete"
-            level_offset, level_length, uncompressed_length = struct.unpack("<QQQ", level_index)
-            if (level_offset < 80 + level_count * 24 or not level_length
-                    or level_length > 512 * 1024 * 1024
-                    or level_offset + level_length > file_size):
-                return False, "KTX2 base mip level has an invalid size"
-            texture_file.seek(level_offset)
-            image_data = texture_file.read(level_length)
-            if len(image_data) != level_length:
-                return False, "KTX2 base mip level is truncated"
-
-        if supercompression == 2:
-            if zstandard is None:
-                return False, "zstandard is not installed; install the project requirements"
-            if not uncompressed_length or uncompressed_length > 512 * 1024 * 1024:
-                return False, "KTX2 decompressed size is invalid or too large"
-            image_data = zstandard.ZstdDecompressor().decompress(
-                image_data, max_output_size=uncompressed_length
-            )
-        elif supercompression == 3:
-            if not uncompressed_length or uncompressed_length > 512 * 1024 * 1024:
-                return False, "KTX2 decompressed size is invalid or too large"
-            decompressor = zlib.decompressobj()
-            image_data = decompressor.decompress(image_data, uncompressed_length + 1)
-            if len(image_data) > uncompressed_length or decompressor.unconsumed_tail:
-                return False, "KTX2 decompressed data exceeds its declared size"
-            image_data += decompressor.flush()
-        elif supercompression not in (0, 1):
-            return False, "unsupported KTX2 supercompression scheme"
-        elif supercompression == 1:
-            return False, "BasisLZ textures need a Basis Universal transcoder"
-        if uncompressed_length and len(image_data) != uncompressed_length:
-            return False, "KTX2 base mip size does not match its header"
-
-        if vk_format in (37, 43):  # R8G8B8A8_UNORM / SRGB
-            image_size = width * height * 4
-            if len(image_data) < image_size:
-                return False, "KTX2 RGBA pixel data is truncated"
-            image = QImage(image_data[:image_size], width, height, width * 4, QImage.Format_RGBA8888)
-        elif vk_format in (23, 29):  # R8G8B8_UNORM / SRGB
-            image_size = width * height * 3
-            if len(image_data) < image_size:
-                return False, "KTX2 RGB pixel data is truncated"
-            image = QImage(image_data[:image_size], width, height, width * 3, QImage.Format_RGB888)
-        elif vk_format == 9:  # R8_UNORM
-            image_size = width * height
-            if len(image_data) < image_size:
-                return False, "KTX2 grayscale pixel data is truncated"
-            image = QImage(image_data[:image_size], width, height, width, QImage.Format_Grayscale8)
-        else:
-            block_decoder = None
-            block_width = 4
-            block_height = 4
-            bytes_per_block = 0
-            is_astc = False
-            if vk_format in (131, 132, 133, 134):  # BC1
-                block_decoder, bytes_per_block = texture2ddecoder.decode_bc1, 8
-            elif vk_format in (137, 138):  # BC3
-                block_decoder, bytes_per_block = texture2ddecoder.decode_bc3, 16
-            elif vk_format == 139:  # BC4 UNORM
-                block_decoder, bytes_per_block = texture2ddecoder.decode_bc4, 8
-            elif vk_format == 141:  # BC5 UNORM
-                block_decoder, bytes_per_block = texture2ddecoder.decode_bc5, 16
-            elif vk_format in (145, 146):  # BC7
-                block_decoder, bytes_per_block = texture2ddecoder.decode_bc7, 16
-            elif vk_format in (147, 148):  # ETC2 RGB
-                block_decoder, bytes_per_block = texture2ddecoder.decode_etc2, 8
-            elif vk_format in (149, 150):  # ETC2 RGB+A1
-                block_decoder, bytes_per_block = texture2ddecoder.decode_etc2a1, 8
-            elif vk_format in (151, 152):  # ETC2 RGBA
-                block_decoder, bytes_per_block = texture2ddecoder.decode_etc2a8, 16
-            else:
-                astc_block_sizes = {
-                    157: (4, 4), 158: (4, 4), 159: (5, 4), 160: (5, 4),
-                    161: (5, 5), 162: (5, 5), 163: (6, 5), 164: (6, 5),
-                    165: (6, 6), 166: (6, 6), 167: (8, 5), 168: (8, 5),
-                    169: (8, 6), 170: (8, 6), 171: (8, 8), 172: (8, 8),
-                    173: (10, 5), 174: (10, 5), 175: (10, 6), 176: (10, 6),
-                    177: (10, 8), 178: (10, 8), 179: (10, 10), 180: (10, 10),
-                    181: (12, 10), 182: (12, 10), 183: (12, 12), 184: (12, 12),
-                }
-                if vk_format in astc_block_sizes:
-                    block_decoder = texture2ddecoder.decode_astc
-                    block_width, block_height = astc_block_sizes[vk_format]
-                    bytes_per_block = 16
-                    is_astc = True
-
-            if block_decoder is None:
-                return False, "this KTX2 pixel format is not supported for PNG conversion"
-
-            blocks_x = (width + block_width - 1) // block_width
-            blocks_y = (height + block_height - 1) // block_height
-            image_size = blocks_x * blocks_y * bytes_per_block
-            if len(image_data) < image_size:
-                return False, "KTX2 compressed pixel data is truncated"
-            if is_astc:
-                decoded_pixels = block_decoder(
-                    image_data[:image_size], width, height, block_width, block_height
-                )
-            else:
-                decoded_pixels = block_decoder(image_data[:image_size], width, height)
-            if len(decoded_pixels) != width * height * 4:
-                return False, "texture decoder returned an invalid pixel buffer"
-            # texture2ddecoder exposes pixels in BGRA byte order.
-            image = QImage(decoded_pixels, width, height, width * 4, QImage.Format_ARGB32)
-
-        image = image.copy()
-        if image.isNull() or not image.save(output_path, "PNG"):
-            return False, "could not write the PNG image"
-        return True, ""
-    except Exception as error:
-        return False, str(error)
-
-
 def _convert_ktx2_with_cli(input_path, output_path):
     """Fallback to Khronos' KTX CLI for KTX2 formats not decoded in-process."""
     import shutil as path_shutil
@@ -1013,8 +859,12 @@ class LanguageManager:
                 self.CHINESE: "查找并导出缓存中的 PNG、JPEG、GIF、BMP 和 WebP 图像，包括缩略图。"
             },
             "texture_extract_description": {
-                self.ENGLISH: "Export cached KTX and DDS textures. Supported KTX2 files also get a PNG image of the base mip; the original texture is kept.",
-                self.CHINESE: "导出缓存中的 KTX 和 DDS 纹理。受支持的 KTX2 还会生成基础 mip 的 PNG 图像，并保留原始纹理。"
+                self.ENGLISH: "Export cached KTX and DDS textures. Choose whether to also create PNGs from supported KTX2 textures.",
+                self.CHINESE: "导出缓存中的 KTX 和 DDS 纹理。可选择是否为受支持的 KTX2 纹理另外生成 PNG。"
+            },
+            "convert_ktx2_to_png_option": {
+                self.ENGLISH: "Also export KTX2 textures as PNG (keep the original .ktx2)",
+                self.CHINESE: "同时将 KTX2 纹理导出为 PNG（保留原始 .ktx2）"
             },
             "ktx2_conversion_success": {
                 self.ENGLISH: "Created PNG texture: {}",
@@ -3033,12 +2883,14 @@ class CacheAssetExtractionWorker(QThread):
     }
     EXCLUDED_FILE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".sqlite", ".sqlite3")
 
-    def __init__(self, directory, custom_output_dir=None, categories=None, language_manager=None):
+    def __init__(self, directory, custom_output_dir=None, categories=None,
+                 language_manager=None, convert_ktx2_to_png=True):
         super().__init__()
         self.directory = os.path.abspath(directory)
         self.custom_output_dir = custom_output_dir
         self.categories = set(categories) if categories else None
         self.language_manager = language_manager
+        self.convert_ktx2_to_png = convert_ktx2_to_png
         self.is_cancelled = False
 
     def _text(self, key, *args):
@@ -3179,7 +3031,7 @@ class CacheAssetExtractionWorker(QThread):
                     processed += 1
                     manifest_rows = [(sequence_number, category, output_path)]
 
-                    if category == "Textures" and extension == "ktx2":
+                    if self.convert_ktx2_to_png and category == "Textures" and extension == "ktx2":
                         png_sequence_number = sequence_number
                         png_path = os.path.join(category_dir, f"{png_sequence_number:05d}.png")
                         while os.path.exists(png_path):
@@ -4266,6 +4118,7 @@ class MainWindow(FluentWindow):
             lang.get("extract_textures"),
             {"Textures"},
             lang.get("texture_extract_description"),
+            allow_ktx2_png=True,
         )
 
     def setupExtractOtherAssetsInterface(self):
@@ -4283,9 +4136,11 @@ class MainWindow(FluentWindow):
             lang.get("extract_all_assets"),
             None,
             lang.get("asset_extract_description"),
+            allow_ktx2_png=True,
         )
 
-    def _setupCacheAssetInterface(self, interface, title_text, categories, description_text):
+    def _setupCacheAssetInterface(self, interface, title_text, categories,
+                                  description_text, allow_ktx2_png=False):
         """Create a shared scan/export page for a cache asset category."""
         page_key = interface.objectName()
         scroll = ScrollArea(interface)
@@ -4305,6 +4160,17 @@ class MainWindow(FluentWindow):
         description = BodyLabel(description_text)
         description.setWordWrap(True)
         source_layout.addWidget(description)
+
+        conversion_checkbox = None
+        if allow_ktx2_png:
+            conversion_checkbox = CheckBox(lang.get("convert_ktx2_to_png_option"))
+            conversion_checkbox.setChecked(
+                self.config_manager.get("convert_ktx2_to_png", True)
+            )
+            conversion_checkbox.stateChanged.connect(
+                lambda state: self.config_manager.set("convert_ktx2_to_png", bool(state))
+            )
+            source_layout.addWidget(conversion_checkbox)
 
         directory_row = QHBoxLayout()
         directory_input = LineEdit()
@@ -4379,6 +4245,7 @@ class MainWindow(FluentWindow):
             "input": directory_input,
             "output_hint": output_hint,
             "categories": categories,
+            "convert_ktx2_to_png": conversion_checkbox,
             "progress": progress,
             "progress_label": progress_label,
             "start": start_button,
@@ -5560,6 +5427,8 @@ class MainWindow(FluentWindow):
             self.config_manager.get("custom_output_dir", ""),
             ui["categories"],
             lang,
+            ui["convert_ktx2_to_png"].isChecked()
+            if ui.get("convert_ktx2_to_png") is not None else False,
         )
         self.asset_extraction_workers[page_key] = worker
         worker.progressUpdated.connect(
