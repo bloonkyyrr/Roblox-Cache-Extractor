@@ -310,7 +310,7 @@ class CentralLogHandler:
 
 # 延迟导入库列表
 _LIBS_IMPORTED = False
-gzip = shutil = random = string = subprocess  = Fore = Style = init = None
+gzip = shutil = subprocess = Fore = Style = init = None
 
 
 def resource_path(relative_path):
@@ -453,7 +453,7 @@ class ClassificationMethod(Enum):
 
 def import_libs():
     """按需导入库，减少启动时间和内存占用"""
-    global gzip, shutil, random, string, hashlib, multiprocessing
+    global gzip, shutil, hashlib, multiprocessing
     global subprocess, ThreadPoolExecutor, Fore, Style, init, _LIBS_IMPORTED
 
     if _LIBS_IMPORTED:
@@ -462,8 +462,6 @@ def import_libs():
     # 导入标准库
     import gzip
     import shutil
-    import random
-    import string
     import hashlib
     import multiprocessing
     import subprocess
@@ -603,6 +601,42 @@ class LanguageManager:
             "extract_textures": {
                 self.ENGLISH: "Extract Textures",
                 self.CHINESE: "提取纹理"
+            },
+            "extract_meshes": {
+                self.ENGLISH: "Extract Meshes",
+                self.CHINESE: "提取网格模型"
+            },
+            "mesh_extract_description": {
+                self.ENGLISH: "Scan Roblox cache files for mesh headers and copy matching files as .mesh. The original mesh data is preserved; this does not convert meshes to OBJ.",
+                self.CHINESE: "扫描 Roblox 缓存文件中的网格模型标识，并将匹配文件复制为 .mesh。保留原始模型数据，不转换为 OBJ。"
+            },
+            "mesh_output_directory": {
+                self.ENGLISH: "Output directory: {}",
+                self.CHINESE: "输出目录：{}"
+            },
+            "mesh_scanning": {
+                self.ENGLISH: "Scanning cache for Roblox meshes...",
+                self.CHINESE: "正在缓存中扫描 Roblox 网格模型..."
+            },
+            "mesh_found": {
+                self.ENGLISH: "Found {} Roblox mesh files.",
+                self.CHINESE: "找到 {} 个 Roblox 网格模型文件。"
+            },
+            "mesh_extraction_complete": {
+                self.ENGLISH: "Extracted {} mesh files to {}.",
+                self.CHINESE: "已提取 {} 个网格模型文件到 {}。"
+            },
+            "mesh_copy_errors": {
+                self.ENGLISH: "Could not copy {} mesh files.",
+                self.CHINESE: "有 {} 个网格模型文件复制失败。"
+            },
+            "mesh_no_files_found": {
+                self.ENGLISH: "No Roblox mesh files were found in this directory.",
+                self.CHINESE: "在此目录中未找到 Roblox 网格模型文件。"
+            },
+            "mesh_progress": {
+                self.ENGLISH: "{} / {} mesh files",
+                self.CHINESE: "{} / {} 个网格模型文件"
             },
             "view_history": {
                 self.ENGLISH: "History",
@@ -1808,6 +1842,8 @@ class RobloxAudioExtractor:
         self.stats = ProcessingStats()
         self.hash_cache = ContentHashCache()
         self.file_lock = threading.Lock()
+        self.filename_lock = threading.Lock()
+        self.next_output_number = 1
 
         # 文件计数器，使用原子操作而不是锁
         self.processed_count = 0
@@ -1845,11 +1881,34 @@ class RobloxAudioExtractor:
             os.makedirs(path, exist_ok=True)
             self.category_dirs[category] = path
 
+        self.next_output_number = self._find_next_output_number()
+
+    def _find_next_output_number(self) -> int:
+        """Resume the five-digit audio sequence after existing output files."""
+        highest_number = 0
+        for root, _, files in os.walk(self.audio_dir):
+            for name in files:
+                try:
+                    prefix = name.split("-", 1)[0]
+                    if prefix.isdigit() and "-" in name:
+                        highest_number = max(highest_number, int(prefix))
+                except (OSError, ValueError):
+                    continue
+        return highest_number + 1
+
+    def _reserve_output_number(self) -> int:
+        """Reserve a unique output sequence number for concurrent workers."""
+        with self.filename_lock:
+            number = self.next_output_number
+            self.next_output_number += 1
+            return number
+
     def find_files_to_process(self) -> List[str]:
         """查找需要处理的文件 - 使用os.scandir优化性能"""
         files_to_process = []
         output_path_norm = os.path.normpath(self.output_dir)
         audio_path_norm = os.path.normpath(self.audio_dir)
+        mesh_output_path_norm = os.path.normpath(os.path.join(self.base_dir, "extracted_meshes"))
 
         def scan_directory(dir_path):
             """递归扫描目录"""
@@ -1861,7 +1920,8 @@ class RobloxAudioExtractor:
                             # 如果目录不是输出目录和Audio目录
                             entry_path_norm = os.path.normpath(entry.path)
                             if (output_path_norm not in entry_path_norm and 
-                                audio_path_norm not in entry_path_norm):
+                                audio_path_norm not in entry_path_norm and
+                                mesh_output_path_norm not in entry_path_norm):
                                 scan_directory(entry.path)
                         elif entry.is_file():
                             # 如果文件名中不包含关键字且不以.ogg结尾
@@ -2110,9 +2170,10 @@ class RobloxAudioExtractor:
         except Exception:
             return 0.0  # 如果获取失败，默认为0秒
 
-    def _get_duration_category(self, file_path: str) -> str:
+    def _get_duration_category(self, file_path: str, duration: Optional[float] = None) -> str:
         """根据音频时长确定类别"""
-        duration = self._get_audio_duration(file_path)
+        if duration is None:
+            duration = self._get_audio_duration(file_path)
 
         for category, (min_duration, max_duration) in self.duration_categories.items():
             if min_duration <= duration < max_duration:
@@ -2133,23 +2194,22 @@ class RobloxAudioExtractor:
     def _save_ogg_file(self, source_path: str, content: bytes) -> Optional[str]:
         """保存提取的OGG文件 - 使用更高效的文件写入"""
         try:
-            # 生成临时文件名
-            base_name = os.path.basename(source_path)
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            if random is None:
-                import_libs()
-            random_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
-            temp_name = f"temp_{base_name}_{timestamp}_{random_suffix}.ogg"
+            # Reserve a stable numeric name before writing the temporary audio file.
+            sequence_number = self._reserve_output_number()
+            temp_name = f"temp_{sequence_number:05d}.ogg"
             temp_path = os.path.join(self.output_dir, temp_name)
 
             # 保存临时文件
             with open(temp_path, 'wb', buffering=1024 * 8) as f:
                 f.write(content)
 
+            # Read duration once for both classification and the output filename.
+            duration = self._get_audio_duration(temp_path)
+
             # 确定分类类别
             if self.classification_method == ClassificationMethod.DURATION:
                 # 按时长分类
-                category = self._get_duration_category(temp_path)
+                category = self._get_duration_category(temp_path, duration)
             else:
                 # 按大小分类
                 file_size = len(content)
@@ -2157,8 +2217,10 @@ class RobloxAudioExtractor:
 
             output_dir = self.category_dirs[category]
 
-            # 生成最终文件名
-            output_name = f"{base_name}_{timestamp}_{random_suffix}.ogg"
+            # Use a readable sequence and duration instead of a randomized name.
+            total_seconds = max(0, int(round(duration)))
+            minutes, seconds = divmod(total_seconds, 60)
+            output_name = f"{sequence_number:05d}-{minutes:02d}M-{seconds:02d}S.ogg"
             output_path = os.path.join(output_dir, output_name)
 
             # 移动文件到正确的类别目录
@@ -2369,6 +2431,136 @@ class ExtractionWorker(QThread):
         self.is_cancelled = True
 
 
+class MeshExtractionWorker(QThread):
+    """Copy Roblox FileMesh cache entries to a dedicated output directory."""
+    progressUpdated = pyqtSignal(int, int)
+    finished = pyqtSignal(dict)
+    logMessage = pyqtSignal(str, str)
+
+    def __init__(self, directory, custom_output_dir=None):
+        super().__init__()
+        self.directory = os.path.abspath(directory)
+        self.custom_output_dir = custom_output_dir
+        self.is_cancelled = False
+
+    @staticmethod
+    def _is_mesh_file(file_path):
+        """Identify a Roblox mesh from its ASCII `version X.XX` header."""
+        try:
+            with open(file_path, "rb") as mesh_file:
+                header = mesh_file.read(12)
+            if len(header) < 12 or header[:8] != b"version ":
+                return False
+            version = header[8:12]
+            return (version[:1].isdigit() and version[1:2] == b"." and
+                    version[2:].isdigit())
+        except OSError:
+            return False
+
+    @staticmethod
+    def _is_inside(path, parent):
+        try:
+            path = os.path.normcase(os.path.abspath(path))
+            parent = os.path.normcase(os.path.abspath(parent))
+            return os.path.commonpath((path, parent)) == parent
+        except (ValueError, OSError):
+            return False
+
+    def _get_output_dir(self):
+        if self.custom_output_dir and os.path.isdir(self.custom_output_dir):
+            return os.path.join(os.path.abspath(self.custom_output_dir), "Meshes")
+        return os.path.join(self.directory, "extracted_meshes")
+
+    def _next_sequence_number(self, output_dir):
+        highest_number = 0
+        try:
+            for name in os.listdir(output_dir):
+                stem, extension = os.path.splitext(name)
+                if extension.lower() == ".mesh" and stem.isdigit():
+                    highest_number = max(highest_number, int(stem))
+        except OSError:
+            pass
+        return highest_number + 1
+
+    def run(self):
+        try:
+            if not os.path.isdir(self.directory):
+                raise FileNotFoundError(f"Input directory does not exist: {self.directory}")
+
+            import shutil as file_shutil
+
+            output_dir = self._get_output_dir()
+            os.makedirs(output_dir, exist_ok=True)
+            output_dir = os.path.abspath(output_dir)
+            output_exclusion = os.path.dirname(output_dir)
+            if os.path.normcase(output_exclusion) == os.path.normcase(self.directory):
+                output_exclusion = output_dir
+            self.logMessage.emit(lang.get("mesh_scanning"), "info")
+
+            mesh_files = []
+            for root, dirs, files in os.walk(self.directory):
+                if self.is_cancelled:
+                    break
+                dirs[:] = sorted(
+                    directory for directory in dirs
+                    if not self._is_inside(os.path.join(root, directory), output_exclusion)
+                )
+                for name in sorted(files):
+                    if self.is_cancelled:
+                        break
+                    source_path = os.path.join(root, name)
+                    if not self._is_inside(source_path, output_exclusion) and self._is_mesh_file(source_path):
+                        mesh_files.append(source_path)
+
+            self.logMessage.emit(lang.get("mesh_found", len(mesh_files)), "info")
+            if not mesh_files:
+                self.finished.emit({
+                    "success": True,
+                    "found": 0,
+                    "processed": 0,
+                    "errors": 0,
+                    "output_dir": output_dir,
+                    "cancelled": self.is_cancelled,
+                })
+                return
+
+            sequence_number = self._next_sequence_number(output_dir)
+            processed = 0
+            errors = 0
+            for index, source_path in enumerate(mesh_files, start=1):
+                if self.is_cancelled:
+                    break
+
+                while True:
+                    output_path = os.path.join(output_dir, f"{sequence_number:05d}.mesh")
+                    sequence_number += 1
+                    if not os.path.exists(output_path):
+                        break
+
+                try:
+                    file_shutil.copy2(source_path, output_path)
+                    processed += 1
+                except OSError as error:
+                    errors += 1
+                    self.logMessage.emit(f"{source_path}: {error}", "error")
+
+                self.progressUpdated.emit(index, len(mesh_files))
+
+            self.finished.emit({
+                "success": True,
+                "found": len(mesh_files),
+                "processed": processed,
+                "errors": errors,
+                "output_dir": output_dir,
+                "cancelled": self.is_cancelled,
+            })
+        except Exception as error:
+            self.finished.emit({"success": False, "error": str(error)})
+
+    def cancel(self):
+        self.is_cancelled = True
+
+
 class CacheClearWorker(QThread):
     """缓存清理工作线程"""
     finished = pyqtSignal(bool, int, int, str)  # 完成信号(成功?, 清理数量, 总数, 错误信息)
@@ -2388,7 +2580,7 @@ class CacheClearWorker(QThread):
             processed_files = 0
 
             # 需要排除的文件夹
-            exclude_dirs = {'extracted_oggs'}
+            exclude_dirs = {'extracted_oggs', 'extracted_meshes'}
             files_to_process = []
 
             # 首先扫描所有文件
@@ -2508,6 +2700,7 @@ class MainWindow(FluentWindow):
         # 初始化工作线程
         self.extraction_worker = None
         self.cache_clear_worker = None
+        self.mesh_extraction_worker = None
         
         # 初始化UI
         self.initUI()
@@ -2631,6 +2824,9 @@ class MainWindow(FluentWindow):
         self.extractTexturesInterface = QWidget()
         self.extractTexturesInterface.setObjectName("extractTexturesInterface")
 
+        self.extractMeshesInterface = QWidget()
+        self.extractMeshesInterface.setObjectName("extractMeshesInterface")
+
         self.clearCacheInterface = QWidget()
         self.clearCacheInterface.setObjectName("clearCacheInterface")
 
@@ -2673,6 +2869,7 @@ class MainWindow(FluentWindow):
         # 同样确保其他接口被添加到堆叠窗口小部件
         self.stackedWidget.addWidget(self.extractImagesInterface)
         self.stackedWidget.addWidget(self.extractTexturesInterface)
+        self.stackedWidget.addWidget(self.extractMeshesInterface)
         
         self.navigationInterface.addItem(
             routeKey=self.extractImagesInterface.objectName(),
@@ -2689,6 +2886,16 @@ class MainWindow(FluentWindow):
             icon=FluentIcon.PALETTE,
             text=lang.get("extract_textures"),
             onClick=lambda: self.switchTo(self.extractTexturesInterface),
+            selectable=True,
+            position=NavigationItemPosition.TOP,
+            parentRouteKey="extract"
+        )
+
+        self.navigationInterface.addItem(
+            routeKey=self.extractMeshesInterface.objectName(),
+            icon=FluentIcon.VIEW,
+            text=lang.get("extract_meshes"),
+            onClick=lambda: self.switchTo(self.extractMeshesInterface),
             selectable=True,
             position=NavigationItemPosition.TOP,
             parentRouteKey="extract"
@@ -2729,6 +2936,7 @@ class MainWindow(FluentWindow):
         self.setupExtractInterface()
         self.setupExtractImagesInterface()
         self.setupExtractTexturesInterface()
+        self.setupExtractMeshesInterface()
         self.setupClearCacheInterface()
         self.setupHistoryInterface()
         self.setupSettingsInterface()
@@ -3363,6 +3571,93 @@ class MainWindow(FluentWindow):
         layout.addWidget(scroll)
         
         # 设置为响应式
+        self.setResponsiveContentWidget(scroll)
+
+    def setupExtractMeshesInterface(self):
+        """Build the cache mesh extraction screen."""
+        scroll = ScrollArea(self.extractMeshesInterface)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(30, 30, 30, 30)
+        content_layout.setSpacing(20)
+
+        cache_card = CardWidget()
+        cache_layout = QVBoxLayout(cache_card)
+        cache_layout.setContentsMargins(20, 15, 20, 15)
+        cache_layout.setSpacing(12)
+        cache_layout.addWidget(TitleLabel(lang.get("extract_meshes")))
+
+        description = BodyLabel(lang.get("mesh_extract_description"))
+        description.setWordWrap(True)
+        cache_layout.addWidget(description)
+
+        directory_row = QHBoxLayout()
+        self.meshDirInput = LineEdit()
+        self.meshDirInput.setText(self.default_dir)
+        self.meshDirInput.setPlaceholderText(lang.get("input_dir"))
+        self.meshDirInput.setClearButtonEnabled(True)
+        self.meshDirInput.textChanged.connect(self.updateMeshOutputHint)
+
+        browse_mesh_btn = PushButton(FluentIcon.FOLDER_ADD, lang.get("browse"))
+        browse_mesh_btn.setFixedSize(100, 33)
+        browse_mesh_btn.clicked.connect(self.browseMeshDirectory)
+        directory_row.addWidget(self.meshDirInput, 1)
+        directory_row.addWidget(browse_mesh_btn)
+        cache_layout.addLayout(directory_row)
+
+        self.meshOutputHint = CaptionLabel()
+        self.meshOutputHint.setWordWrap(True)
+        self.updateMeshOutputHint(self.meshDirInput.text())
+        cache_layout.addWidget(self.meshOutputHint)
+        content_layout.addWidget(cache_card)
+
+        control_card = CardWidget()
+        control_layout = QVBoxLayout(control_card)
+        control_layout.setContentsMargins(20, 15, 20, 15)
+        control_layout.setSpacing(12)
+
+        self.meshProgressBar = ProgressBar()
+        self.meshProgressBar.setValue(0)
+        self.meshProgressBar.setTextVisible(True)
+        self.meshProgressLabel = CaptionLabel(lang.get("ready"))
+        self.meshProgressLabel.setAlignment(Qt.AlignCenter)
+        control_layout.addWidget(self.meshProgressBar)
+        control_layout.addWidget(self.meshProgressLabel)
+
+        button_row = QHBoxLayout()
+        self.meshExtractButton = PrimaryPushButton(FluentIcon.DOWNLOAD, lang.get("start_extraction"))
+        self.meshExtractButton.setFixedHeight(40)
+        self.meshExtractButton.clicked.connect(self.startMeshExtraction)
+        self.meshCancelButton = PushButton(FluentIcon.CLOSE, lang.get("cancel"))
+        self.meshCancelButton.setFixedHeight(40)
+        self.meshCancelButton.clicked.connect(self.cancelMeshExtraction)
+        self.meshCancelButton.hide()
+        button_row.addWidget(self.meshExtractButton)
+        button_row.addWidget(self.meshCancelButton)
+        button_row.addStretch()
+        control_layout.addLayout(button_row)
+        content_layout.addWidget(control_card)
+
+        log_card = CardWidget()
+        log_card.setFixedHeight(280)
+        log_layout = QVBoxLayout(log_card)
+        log_layout.setContentsMargins(20, 10, 20, 15)
+        log_layout.setSpacing(10)
+        log_layout.addWidget(StrongBodyLabel(lang.get("recent_activity")))
+        self.meshLogText = TextEdit()
+        self.meshLogText.setReadOnly(True)
+        self.meshLogText.setFixedHeight(200)
+        log_layout.addWidget(self.meshLogText)
+        content_layout.addWidget(log_card)
+
+        scroll.setWidget(content_widget)
+        layout = QVBoxLayout(self.extractMeshesInterface)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(scroll)
+        self.meshLogHandler = LogHandler(self.meshLogText)
         self.setResponsiveContentWidget(scroll)
 
     def setupClearCacheInterface(self):
@@ -4397,6 +4692,102 @@ class MainWindow(FluentWindow):
             self.dirInput.setText(directory)
             self.config_manager.set("last_directory", directory)
 
+    def browseMeshDirectory(self):
+        """Choose the cache folder to scan for Roblox meshes."""
+        directory = QFileDialog.getExistingDirectory(
+            self, lang.get("directory"), self.meshDirInput.text()
+        )
+        if directory:
+            self.meshDirInput.setText(directory)
+
+    def updateMeshOutputHint(self, input_directory):
+        """Keep the displayed mesh output path in sync with the chosen cache."""
+        custom_output_dir = self.config_manager.get("custom_output_dir", "")
+        if custom_output_dir and os.path.isdir(custom_output_dir):
+            output_dir = os.path.join(os.path.abspath(custom_output_dir), "Meshes")
+        else:
+            output_dir = os.path.join(os.path.abspath(input_directory or "."), "extracted_meshes")
+        if hasattr(self, "meshOutputHint"):
+            self.meshOutputHint.setText(lang.get("mesh_output_directory", output_dir))
+
+    def startMeshExtraction(self):
+        """Start scanning the selected cache directory for mesh files."""
+        global_input_path = self.config_manager.get("global_input_path", "")
+        selected_dir = global_input_path if global_input_path else self.meshDirInput.text().strip()
+        if global_input_path and self.meshDirInput.text() != global_input_path:
+            self.meshDirInput.setText(global_input_path)
+        self.updateMeshOutputHint(selected_dir)
+
+        if not os.path.isdir(selected_dir):
+            self.meshLogHandler.error(f"{lang.get('directory')}: {selected_dir}")
+            InfoBar.error(
+                title=lang.get("task_failed"),
+                content=lang.get("dir_not_exist", selected_dir),
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=5000,
+                parent=self,
+            )
+            return
+
+        custom_output_dir = self.config_manager.get("custom_output_dir", "")
+        self.mesh_extraction_worker = MeshExtractionWorker(selected_dir, custom_output_dir)
+        self.mesh_extraction_worker.progressUpdated.connect(self.updateMeshExtractionProgress)
+        self.mesh_extraction_worker.finished.connect(self.meshExtractionFinished)
+        self.mesh_extraction_worker.logMessage.connect(self.handleMeshExtractionLog)
+
+        self.meshExtractButton.hide()
+        self.meshCancelButton.show()
+        self.meshProgressBar.setValue(0)
+        self.meshProgressLabel.setText(lang.get("processing"))
+        self.mesh_extraction_worker.start()
+
+    def cancelMeshExtraction(self):
+        if self.mesh_extraction_worker and self.mesh_extraction_worker.isRunning():
+            self.mesh_extraction_worker.cancel()
+            self.meshLogHandler.warning(lang.get("canceled_by_user"))
+
+    def updateMeshExtractionProgress(self, current, total):
+        progress = min(100, int((current / total) * 100)) if total else 0
+        self.meshProgressBar.setValue(progress)
+        self.meshProgressLabel.setText(lang.get("mesh_progress", current, total))
+
+    def meshExtractionFinished(self, result):
+        self.meshCancelButton.hide()
+        self.meshExtractButton.show()
+        self.meshProgressBar.setValue(0)
+        self.meshProgressLabel.setText(lang.get("ready"))
+
+        if not result.get("success", False):
+            error = result.get("error", "Unknown error")
+            self.meshLogHandler.error(error)
+            InfoBar.error(
+                title=lang.get("task_failed"),
+                content=error,
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=5000,
+                parent=self,
+            )
+            return
+
+        processed = result.get("processed", 0)
+        found = result.get("found", 0)
+        errors = result.get("errors", 0)
+        output_dir = result.get("output_dir", "")
+        if processed:
+            self.meshLogHandler.success(lang.get("mesh_extraction_complete", processed, output_dir))
+            if self.config_manager.get("auto_open_output_dir", True) and os.path.isdir(output_dir):
+                open_directory(output_dir)
+        if errors:
+            self.meshLogHandler.warning(lang.get("mesh_copy_errors", errors))
+        if not found and not result.get("cancelled", False):
+            self.meshLogHandler.warning(lang.get("mesh_no_files_found"))
+        elif result.get("cancelled", False):
+            self.meshLogHandler.warning(lang.get("canceled_by_user"))
+
     def updateClassificationInfo(self):
         """更新分类信息标签"""
         if self.durationRadio.isChecked():
@@ -4753,6 +5144,17 @@ class MainWindow(FluentWindow):
                 duration=5000,
                 parent=self
             )
+
+    def handleMeshExtractionLog(self, message, msg_type="info"):
+        """Display cache mesh worker messages."""
+        if msg_type == "info":
+            self.meshLogHandler.info(message)
+        elif msg_type == "success":
+            self.meshLogHandler.success(message)
+        elif msg_type == "warning":
+            self.meshLogHandler.warning(message)
+        elif msg_type == "error":
+            self.meshLogHandler.error(message)
 
     def handleExtractionLog(self, message, msg_type="info"):
         """处理提取过程中的日志消息"""

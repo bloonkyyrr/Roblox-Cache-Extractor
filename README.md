@@ -26,6 +26,8 @@ English | [简体中文](README_ZH.md)
 - **Modern GUI Interface** - Built with PyQt5 and PyQt-Fluent-Widgets for a beautiful, responsive user experience
 - **Automatic Scanning** - Intelligently scans Roblox cache directories to quickly locate audio files
 - **Audio Extraction** - Extracts hidden OGG audio files from cache with optimized algorithms
+- **Mesh Extraction** - Finds Roblox mesh files in cache and copies the original data to numbered `.mesh` files
+- **Readable Audio Names** - Saves audio as sequential names with duration, such as `00001-02M-03S.ogg`
 - **Smart Classification** - Two classification methods:
   - **By Duration**: Categorizes audio by length (requires FFmpeg)
   - **By File Size**: Categorizes audio by file size (no FFmpeg required)
