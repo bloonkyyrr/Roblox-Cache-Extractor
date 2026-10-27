@@ -38,6 +38,8 @@
 
 使用 **提取 → 提取所有资源** 可将识别到的资源分类导出到 `extracted_assets`（或设置的输出目录下的 `CacheAssets`）。图像、纹理、网格模型和“模型及其他资源”页面也可单独导出对应类别。导出时会去除 Roblox 的 `RBXH` 缓存封装，并保留原始资源字节。无法识别的内容会以 `.bin` 保存到 `Other`，不会被静默丢弃。`manifest.csv` 会记录编号文件对应的缓存文件和来源 URL。
 
+受支持的 KTX2 纹理还会从基础 mip 的第一张图生成 `.png`，并保留原始 `.ktx2`。转换支持常见 BC、ETC2、ASTC、未压缩格式，以及 Zstandard/ZLIB 超级压缩。BasisLZ 纹理在 PATH 中存在 Khronos `ktx` 命令行工具时也可转换。请安装项目的 `requirements.txt` 以获取内置解码依赖。数组和立方体纹理目前只导出第一层/第一面。
+
 支持 PNG/JPEG/GIF/BMP/WebP/TIFF/AVIF/HEIC/SVG 图像、KTX/KTX2/DDS 纹理、OGG/MP3/WAV/FLAC/M4A/AAC/AIFF 音频、Roblox 网格模型、RBXM/RBXMX/RBXL/RBXLX 模型和场景、动画序列、TTF/OTF/WOFF 字体、WebM/MP4/AVI/MPEG-TS/fMP4 视频，以及 JSON/XML/HLS 元数据。视频播放列表及缓存片段会分别导出；提取器不会重建分段 HLS 视频。
 
 <p align="center">
@@ -62,9 +64,8 @@
    ```
 
 2. **安装依赖**
-   ```bash
-   pip install -r requirements.txt
-   ```
+   - **Windows**：双击运行 `install_dependencies.bat`
+   - **macOS/Linux**：运行 `pip install -r requirements.txt`。
 
 3. **安装 FFmpeg**（可选但推荐）
    - **Windows**：从[官方网站](https://ffmpeg.org/download.html)下载并添加到 PATH

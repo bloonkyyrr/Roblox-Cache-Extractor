@@ -45,6 +45,8 @@ English | [简体中文](README_ZH.md)
 
 Use **Extract → Extract All Assets** to export recognized payloads into category folders under `extracted_assets` (or `CacheAssets` inside the configured output folder). The image, texture, mesh, and models/more screens can also export one category at a time. Roblox's `RBXH` cache envelope is removed while the original asset payload is preserved. Unknown payloads are saved as `.bin` files in `Other` so they are not silently discarded. `manifest.csv` maps each numbered export back to its cache file and source URL.
 
+Supported KTX2 textures also produce a `.png` from the base mip's first image, alongside the original `.ktx2`. Conversion supports common BC, ETC2, ASTC, and uncompressed formats with Zstandard or ZLIB supercompression. BasisLZ textures can use the Khronos `ktx` CLI when it is available on PATH. Install the project's `requirements.txt` for the in-process decoder dependencies. Array and cubemap textures currently export their first layer/face.
+
 Supported signatures include PNG/JPEG/GIF/BMP/WebP/TIFF/AVIF/HEIC/SVG images, KTX/KTX2/DDS textures, OGG/MP3/WAV/FLAC/M4A/AAC/AIFF audio, Roblox meshes, RBXM/RBXMX/RBXL/RBXLX models and places, animation sequences, TTF/OTF/WOFF fonts, WebM/MP4/AVI/MPEG-TS/fMP4 video, and JSON/XML/HLS metadata. Video playlist metadata and its cached segments are exported separately; the extractor does not rebuild segmented HLS videos.
 
 <p align="center">
@@ -69,9 +71,8 @@ Supported signatures include PNG/JPEG/GIF/BMP/WebP/TIFF/AVIF/HEIC/SVG images, KT
    ```
 
 2. **Install Dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
+   - **Windows**: Double-click `install_dependencies.bat`
+   - **macOS/Linux**: Run `pip install -r requirements.txt`.
 
 3. **Install FFmpeg** (Optional but recommended)
    - **Windows**: Download from [official website](https://ffmpeg.org/download.html) and add to PATH
