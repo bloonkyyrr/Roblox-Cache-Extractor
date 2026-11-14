@@ -352,7 +352,10 @@ class ConfigManager:
             "save_logs": False,  # 是否保存日志
             "auto_open_output_dir": True,  # 提取完成后是否自动打开输出目录
             "use_custom_theme_color": False,  # 是否使用自定义主题颜色
-            "theme_color": "#0078d4"  # 默认主题颜色
+            "theme_color": "#0078d4",  # 默认主题颜色
+            "export_as_rbxm": True,  # 网格导出：是否输出 RBXM
+            "export_as_obj": True,  # 网格导出：是否输出 OBJ
+            "export_as_fbx": False  # 网格导出：是否输出 FBX
         }
 
         try:
@@ -603,6 +606,86 @@ class LanguageManager:
             "extract_textures": {
                 self.ENGLISH: "Extract Textures",
                 self.CHINESE: "提取纹理"
+            },
+            "extract_meshes": {
+                self.ENGLISH: "Extract Meshes",
+                self.CHINESE: "提取网格"
+            },
+            "mesh_source": {
+                self.ENGLISH: "RBXM file or folder",
+                self.CHINESE: "RBXM 文件或文件夹"
+            },
+            "mesh_source_placeholder": {
+                self.ENGLISH: "Path to a .rbxm/.rbxmx file, or a folder with models",
+                self.CHINESE: "输入 .rbxm/.rbxmx 文件路径，或包含模型的文件夹"
+            },
+            "select_rbxm_file": {
+                self.ENGLISH: "Select RBXM file",
+                self.CHINESE: "选择 RBXM 文件"
+            },
+            "select_rbxm_folder": {
+                self.ENGLISH: "Select model folder",
+                self.CHINESE: "选择模型文件夹"
+            },
+            "browse_file": {
+                self.ENGLISH: "File",
+                self.CHINESE: "文件"
+            },
+            "browse_folder": {
+                self.ENGLISH: "Folder",
+                self.CHINESE: "文件夹"
+            },
+            "export_formats": {
+                self.ENGLISH: "Export formats",
+                self.CHINESE: "导出格式"
+            },
+            "export_as_rbxm": {
+                self.ENGLISH: "Export as RBXM",
+                self.CHINESE: "导出为 RBXM"
+            },
+            "export_as_obj": {
+                self.ENGLISH: "Export as OBJ",
+                self.CHINESE: "导出为 OBJ"
+            },
+            "export_as_fbx": {
+                self.ENGLISH: "Export as FBX",
+                self.CHINESE: "导出为 FBX"
+            },
+            "start_mesh_export": {
+                self.ENGLISH: "Export Meshes",
+                self.CHINESE: "导出网格"
+            },
+            "mesh_hint": {
+                self.ENGLISH: "Every part is triangulated from its CFrame, Size and shape. RBXM files only store mesh asset ids, so MeshParts and unions are exported as bounding boxes.",
+                self.CHINESE: "每个部件都会根据 CFrame、Size 和形状进行三角化。RBXM 文件只保存网格资产 ID 而非三角面，因此 MeshPart 和联合体将按包围盒导出。"
+            },
+            "select_export_format": {
+                self.ENGLISH: "Select at least one export format",
+                self.CHINESE: "请至少选择一种导出格式"
+            },
+            "no_rbxm_files": {
+                self.ENGLISH: "No .rbxm, .rbxmx or .rbxl files were found",
+                self.CHINESE: "未找到 .rbxm、.rbxmx 或 .rbxl 文件"
+            },
+            "mesh_processing_file": {
+                self.ENGLISH: "Exporting {}...",
+                self.CHINESE: "正在导出 {}..."
+            },
+            "mesh_files_written": {
+                self.ENGLISH: "Wrote {} ({} parts, {} triangles)",
+                self.CHINESE: "已写入 {}（{} 个部件，{} 个三角形）"
+            },
+            "mesh_export_failed": {
+                self.ENGLISH: "Failed to export {}: {}",
+                self.CHINESE: "导出 {} 失败：{}"
+            },
+            "mesh_export_complete": {
+                self.ENGLISH: "Mesh export completed!",
+                self.CHINESE: "网格导出完成！"
+            },
+            "mesh_export_summary": {
+                self.ENGLISH: "Models: {} | Exported: {} | Errors: {}",
+                self.CHINESE: "模型：{} | 已导出：{} | 错误：{}"
             },
             "view_history": {
                 self.ENGLISH: "History",
@@ -2631,6 +2714,9 @@ class MainWindow(FluentWindow):
         self.extractTexturesInterface = QWidget()
         self.extractTexturesInterface.setObjectName("extractTexturesInterface")
 
+        self.extractMeshesInterface = QWidget()
+        self.extractMeshesInterface.setObjectName("extractMeshesInterface")
+
         self.clearCacheInterface = QWidget()
         self.clearCacheInterface.setObjectName("clearCacheInterface")
 
@@ -2673,6 +2759,7 @@ class MainWindow(FluentWindow):
         # 同样确保其他接口被添加到堆叠窗口小部件
         self.stackedWidget.addWidget(self.extractImagesInterface)
         self.stackedWidget.addWidget(self.extractTexturesInterface)
+        self.stackedWidget.addWidget(self.extractMeshesInterface)
         
         self.navigationInterface.addItem(
             routeKey=self.extractImagesInterface.objectName(),
@@ -2689,6 +2776,16 @@ class MainWindow(FluentWindow):
             icon=FluentIcon.PALETTE,
             text=lang.get("extract_textures"),
             onClick=lambda: self.switchTo(self.extractTexturesInterface),
+            selectable=True,
+            position=NavigationItemPosition.TOP,
+            parentRouteKey="extract"
+        )
+
+        self.navigationInterface.addItem(
+            routeKey=self.extractMeshesInterface.objectName(),
+            icon=FluentIcon.DOCUMENT,
+            text=lang.get("extract_meshes"),
+            onClick=lambda: self.switchTo(self.extractMeshesInterface),
             selectable=True,
             position=NavigationItemPosition.TOP,
             parentRouteKey="extract"
@@ -2729,6 +2826,7 @@ class MainWindow(FluentWindow):
         self.setupExtractInterface()
         self.setupExtractImagesInterface()
         self.setupExtractTexturesInterface()
+        self.setupExtractMeshesInterface()
         self.setupClearCacheInterface()
         self.setupHistoryInterface()
         self.setupSettingsInterface()
@@ -3364,6 +3462,303 @@ class MainWindow(FluentWindow):
         
         # 设置为响应式
         self.setResponsiveContentWidget(scroll)
+
+    def setupExtractMeshesInterface(self):
+        """设置网格导出界面"""
+        scroll = ScrollArea(self.extractMeshesInterface)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(30, 30, 30, 30)
+        content_layout.setSpacing(20)
+
+        # 说明卡片
+        info_card = CardWidget()
+        info_layout = QVBoxLayout(info_card)
+        info_layout.setContentsMargins(20, 15, 20, 15)
+        info_layout.setSpacing(10)
+
+        info_title = SubtitleLabel(lang.get("extract_meshes"))
+        info_title.setObjectName("extractMeshesTitle")
+        info_layout.addWidget(info_title)
+
+        info_hint = BodyLabel(lang.get("mesh_hint"))
+        info_hint.setWordWrap(True)
+        info_layout.addWidget(info_hint)
+
+        content_layout.addWidget(info_card)
+
+        # 源文件卡片
+        source_card = CardWidget()
+        source_layout = QVBoxLayout(source_card)
+        source_layout.setContentsMargins(20, 15, 20, 15)
+        source_layout.setSpacing(15)
+
+        source_title = StrongBodyLabel(lang.get("mesh_source"))
+        source_layout.addWidget(source_title)
+
+        source_row = QHBoxLayout()
+        source_row.setSpacing(10)
+
+        self.meshSourceInput = LineEdit()
+        self.meshSourceInput.setPlaceholderText(lang.get("mesh_source_placeholder"))
+        self.meshSourceInput.setClearButtonEnabled(True)
+
+        browse_file_btn = PushButton(FluentIcon.DOCUMENT, lang.get("browse_file"))
+        browse_file_btn.setFixedSize(100, 33)
+        browse_file_btn.clicked.connect(self.browseMeshSource)
+
+        browse_folder_btn = PushButton(FluentIcon.FOLDER_ADD, lang.get("browse_folder"))
+        browse_folder_btn.setFixedSize(100, 33)
+        browse_folder_btn.clicked.connect(self.browseMeshFolder)
+
+        source_row.addWidget(self.meshSourceInput, 1)
+        source_row.addWidget(browse_file_btn)
+        source_row.addWidget(browse_folder_btn)
+
+        source_layout.addLayout(source_row)
+        content_layout.addWidget(source_card)
+
+        # 导出格式卡片
+        format_card = CardWidget()
+        format_layout = QVBoxLayout(format_card)
+        format_layout.setContentsMargins(20, 15, 20, 15)
+        format_layout.setSpacing(12)
+
+        format_title = StrongBodyLabel(lang.get("export_formats"))
+        format_layout.addWidget(format_title)
+
+        format_row = QHBoxLayout()
+        format_row.setSpacing(20)
+
+        self.meshRbxmCheckBox = CheckBox(lang.get("export_as_rbxm"))
+        self.meshRbxmCheckBox.setChecked(bool(self.config_manager.get("export_as_rbxm", True)))
+        self.meshRbxmCheckBox.toggled.connect(
+            lambda checked: self.config_manager.set("export_as_rbxm", bool(checked))
+        )
+
+        self.meshObjCheckBox = CheckBox(lang.get("export_as_obj"))
+        self.meshObjCheckBox.setChecked(bool(self.config_manager.get("export_as_obj", True)))
+        self.meshObjCheckBox.toggled.connect(
+            lambda checked: self.config_manager.set("export_as_obj", bool(checked))
+        )
+
+        self.meshFbxCheckBox = CheckBox(lang.get("export_as_fbx"))
+        self.meshFbxCheckBox.setChecked(bool(self.config_manager.get("export_as_fbx", False)))
+        self.meshFbxCheckBox.toggled.connect(
+            lambda checked: self.config_manager.set("export_as_fbx", bool(checked))
+        )
+
+        format_row.addWidget(self.meshRbxmCheckBox)
+        format_row.addWidget(self.meshObjCheckBox)
+        format_row.addWidget(self.meshFbxCheckBox)
+        format_row.addStretch()
+
+        format_layout.addLayout(format_row)
+        content_layout.addWidget(format_card)
+
+        # 操作控制卡片
+        control_card = CardWidget()
+        control_layout = QVBoxLayout(control_card)
+        control_layout.setContentsMargins(25, 20, 25, 20)
+        control_layout.setSpacing(15)
+
+        self.meshProgressBar = ProgressBar()
+        self.meshProgressBar.setValue(0)
+        self.meshProgressBar.setTextVisible(True)
+
+        self.meshProgressLabel = CaptionLabel(lang.get("ready"))
+        self.meshProgressLabel.setAlignment(Qt.AlignCenter)
+
+        control_layout.addWidget(self.meshProgressBar)
+        control_layout.addWidget(self.meshProgressLabel)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(15)
+
+        self.meshExportButton = PrimaryPushButton(FluentIcon.DOCUMENT, lang.get("start_mesh_export"))
+        self.meshExportButton.setFixedHeight(40)
+        self.meshExportButton.clicked.connect(self.startMeshExtraction)
+
+        self.meshCancelButton = PushButton(FluentIcon.CLOSE, lang.get("cancel"))
+        self.meshCancelButton.setFixedHeight(40)
+        self.meshCancelButton.clicked.connect(self.cancelMeshExtraction)
+        self.meshCancelButton.hide()
+
+        button_row.addWidget(self.meshExportButton)
+        button_row.addWidget(self.meshCancelButton)
+        button_row.addStretch()
+
+        control_layout.addLayout(button_row)
+        content_layout.addWidget(control_card)
+
+        # 日志区域
+        log_card = CardWidget()
+        log_card.setFixedHeight(300)
+
+        log_layout = QVBoxLayout(log_card)
+        log_layout.setContentsMargins(20, 10, 20, 15)
+        log_layout.setSpacing(10)
+
+        log_title = StrongBodyLabel(lang.get("recent_activity"))
+        log_layout.addWidget(log_title)
+
+        self.meshLogText = TextEdit()
+        self.meshLogText.setReadOnly(True)
+        self.meshLogText.setFixedHeight(220)
+        log_layout.addWidget(self.meshLogText)
+
+        content_layout.addWidget(log_card)
+
+        scroll.setWidget(content_widget)
+
+        main_layout = QVBoxLayout(self.extractMeshesInterface)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(scroll)
+
+        self.setResponsiveContentWidget(scroll)
+
+        self.meshLogHandler = LogHandler(self.meshLogText)
+        self.meshLogHandler.info(lang.get("mesh_hint"))
+
+    def browseMeshSource(self):
+        """选择单个 RBXM 模型文件"""
+        start_dir = self.config_manager.get("last_mesh_dir", "") or self.default_dir
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            lang.get("select_rbxm_file"),
+            start_dir,
+            "Roblox models (*.rbxm *.rbxmx *.rbxl)"
+        )
+        if file_path:
+            self.meshSourceInput.setText(file_path)
+            self.config_manager.set("last_mesh_dir", os.path.dirname(file_path))
+
+    def browseMeshFolder(self):
+        """选择包含模型的文件夹"""
+        start_dir = self.config_manager.get("last_mesh_dir", "") or self.default_dir
+        directory = QFileDialog.getExistingDirectory(self, lang.get("select_rbxm_folder"), start_dir)
+        if directory:
+            self.meshSourceInput.setText(directory)
+            self.config_manager.set("last_mesh_dir", directory)
+
+    def startMeshExtraction(self):
+        """开始导出网格"""
+        source = self.meshSourceInput.text().strip()
+        if not source:
+            self.meshLogHandler.warning(lang.get("mesh_source_placeholder"))
+            return
+
+        if not os.path.exists(source):
+            self.meshLogHandler.error(lang.get("dir_not_exist", source))
+            return
+
+        export_rbxm = self.meshRbxmCheckBox.isChecked()
+        export_obj = self.meshObjCheckBox.isChecked()
+        export_fbx = self.meshFbxCheckBox.isChecked()
+        if not (export_rbxm or export_obj or export_fbx):
+            self.meshLogHandler.warning(lang.get("select_export_format"))
+            return
+
+        custom_output_dir = self.config_manager.get("custom_output_dir", "")
+        if custom_output_dir and os.path.isdir(custom_output_dir):
+            base_dir = custom_output_dir
+        else:
+            base_dir = os.path.dirname(source) if os.path.isfile(source) else source
+
+        output_dir = os.path.join(base_dir, "extracted_meshes")
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except Exception as e:
+            self.meshLogHandler.error(lang.get("dir_create_failed", str(e)))
+            return
+
+        self.mesh_worker = MeshExtractionWorker(source, output_dir, export_rbxm, export_obj, export_fbx)
+        self.mesh_worker.progressUpdated.connect(self.updateMeshProgress)
+        self.mesh_worker.logMessage.connect(self.handleMeshLog)
+        self.mesh_worker.finished.connect(self.meshExtractionFinished)
+
+        self.meshExportButton.hide()
+        self.meshCancelButton.show()
+        self.meshProgressBar.setValue(0)
+        self.meshProgressLabel.setText(lang.get("processing"))
+
+        self.meshStateTooltip = StateToolTip(lang.get("task_running"), lang.get("processing"), self)
+        self.meshStateTooltip.show()
+
+        self.mesh_worker.start()
+
+    def cancelMeshExtraction(self):
+        """取消网格导出"""
+        if getattr(self, "mesh_worker", None) and self.mesh_worker.isRunning():
+            self.mesh_worker.cancel()
+            self.meshCancelButton.hide()
+            self.meshExportButton.show()
+            self.meshProgressBar.setValue(0)
+            self.meshProgressLabel.setText(lang.get("ready"))
+            self.handleMeshLog(lang.get("canceled_by_user"), "warning")
+
+    def updateMeshProgress(self, current, total):
+        """更新网格导出进度"""
+        progress = min(100, int((current / total) * 100)) if total else 0
+        self.meshProgressBar.setValue(progress)
+
+        status_text = f"{progress}% - {current}/{total}"
+        self.meshProgressLabel.setText(status_text)
+
+        if hasattr(self, "meshStateTooltip"):
+            self.meshStateTooltip.setContent(status_text)
+
+    def handleMeshLog(self, message, level="info"):
+        """处理网格导出日志"""
+        if not hasattr(self, "meshLogHandler"):
+            return
+        if level == "error":
+            self.meshLogHandler.error(message)
+        elif level == "warning":
+            self.meshLogHandler.warning(message)
+        elif level == "success":
+            self.meshLogHandler.success(message)
+        else:
+            self.meshLogHandler.info(message)
+
+    def meshExtractionFinished(self, result):
+        """网格导出完成处理"""
+        self.meshCancelButton.hide()
+        self.meshExportButton.show()
+        self.meshProgressBar.setValue(0)
+        self.meshProgressLabel.setText(lang.get("ready"))
+
+        if hasattr(self, "meshStateTooltip"):
+            self.meshStateTooltip.setState(True)
+            QTimer.singleShot(2000, self.meshStateTooltip.close)
+
+        if result.get("success", False):
+            self.meshLogHandler.success(lang.get("mesh_export_complete"))
+            self.meshLogHandler.info(lang.get(
+                "mesh_export_summary",
+                result.get("total", 0),
+                result.get("exported", 0),
+                result.get("errors", 0)
+            ))
+            self.meshLogHandler.info(lang.get("output_dir", result.get("output_dir", "")))
+
+            if self.config_manager.get("auto_open_output_dir", True):
+                try:
+                    target = result.get("output_dir", "")
+                    if target and os.path.isdir(target):
+                        if os.name == "nt":
+                            os.startfile(target)
+                        elif sys.platform == "darwin":
+                            subprocess.Popen(["open", target])
+                        else:
+                            subprocess.Popen(["xdg-open", target])
+                except Exception:
+                    pass
+        else:
+            self.meshLogHandler.error(result.get("error", lang.get("task_failed")))
 
     def setupClearCacheInterface(self):
         scroll = ScrollArea(self.clearCacheInterface)
@@ -5157,6 +5552,107 @@ class MainWindow(FluentWindow):
             # 显示成功消息
             if hasattr(self, 'settingsLogHandler'):
                 self.settingsLogHandler.success(lang.get("default_path_restored") + f": {default_roblox_dir}")
+
+
+class MeshExtractionWorker(QThread):
+    """网格导出工作线程"""
+    progressUpdated = pyqtSignal(int, int)  # 进度更新信号(当前进度, 总数)
+    finished = pyqtSignal(dict)  # 完成信号(结果字典)
+    logMessage = pyqtSignal(str, str)  # 日志消息信号(消息, 类型)
+
+    MODEL_EXTENSIONS = (".rbxm", ".rbxmx", ".rbxl")
+
+    def __init__(self, source_path, output_dir, export_rbxm=True, export_obj=False, export_fbx=False):
+        super().__init__()
+        self.source_path = source_path
+        self.output_dir = output_dir
+        self.export_rbxm = export_rbxm
+        self.export_obj = export_obj
+        self.export_fbx = export_fbx
+        self.is_cancelled = False
+
+    def cancel(self):
+        """取消导出"""
+        self.is_cancelled = True
+
+    def collect_files(self):
+        """收集待导出的模型文件"""
+        if os.path.isfile(self.source_path):
+            return [self.source_path]
+
+        found = []
+        for root, _dirs, files in os.walk(self.source_path):
+            for name in sorted(files):
+                if name.lower().endswith(self.MODEL_EXTENSIONS):
+                    found.append(os.path.join(root, name))
+        return found
+
+    def run(self):
+        """运行线程：把模型导出为 RBXM/OBJ/FBX"""
+        try:
+            from src.core import rbxm_mesh
+        except Exception as e:
+            self.logMessage.emit(lang.get("error_occurred", str(e)), "error")
+            self.finished.emit({"success": False, "error": str(e)})
+            return
+
+        try:
+            files = self.collect_files()
+            total = len(files)
+
+            if not total:
+                self.logMessage.emit(lang.get("no_rbxm_files"), "warning")
+                self.finished.emit({
+                    "success": True,
+                    "total": 0,
+                    "exported": 0,
+                    "errors": 0,
+                    "output_dir": self.output_dir
+                })
+                return
+
+            exported = 0
+            errors = 0
+
+            for index, path in enumerate(files, start=1):
+                if self.is_cancelled:
+                    break
+
+                self.logMessage.emit(lang.get("mesh_processing_file", os.path.basename(path)), "info")
+                try:
+                    result = rbxm_mesh.export_model(
+                        path,
+                        self.output_dir,
+                        self.export_rbxm,
+                        self.export_obj,
+                        self.export_fbx
+                    )
+                    for note in result.get("notes", []):
+                        self.logMessage.emit(note, "warning")
+                    written_names = ", ".join(os.path.basename(f) for f in result.get("files", []))
+                    self.logMessage.emit(
+                        lang.get("mesh_files_written", written_names, result.get("parts", 0), result.get("triangles", 0)),
+                        "success"
+                    )
+                    exported += 1
+                except Exception as e:
+                    errors += 1
+                    self.logMessage.emit(lang.get("mesh_export_failed", os.path.basename(path), str(e)), "error")
+
+                self.progressUpdated.emit(index, total)
+
+            self.finished.emit({
+                "success": True,
+                "total": total,
+                "exported": exported,
+                "errors": errors,
+                "output_dir": self.output_dir
+            })
+
+        except Exception as e:
+            self.logMessage.emit(lang.get("error_occurred", str(e)), "error")
+            traceback.print_exc()
+            self.finished.emit({"success": False, "error": str(e)})
 
 
 def main():
