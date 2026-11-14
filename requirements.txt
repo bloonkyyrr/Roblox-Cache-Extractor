@@ -2,3 +2,5 @@ colorama
 PyQt5
 PyQt-Fluent-Widgets
 requests
+texture2ddecoder==1.0.5
+zstandard>=0.19,<0.26
