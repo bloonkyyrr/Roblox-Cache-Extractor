@@ -3015,6 +3015,52 @@ class CacheAssetExtractionWorker(QThread):
             pass
         return 0.0
 
+    @staticmethod
+    def _repair_model_file(path):
+        """Make an exported .rbxm/.rbxl openable in Roblox Studio.
+
+        Roblox caches CSG results as ``PartOperationAsset`` wrappers, which
+        Studio reports as corrupted files. Those wrappers are replaced with the
+        model they contain, and payloads that hold no model at all become a
+        single placeholder instance instead of a broken file.
+        """
+        from src.core import rbxm_mesh
+
+        stem = os.path.splitext(os.path.basename(path))[0]
+        try:
+            with open(path, "rb") as handle:
+                data = handle.read()
+        except OSError:
+            return "failed"
+        if not data.startswith(rbxm_mesh.MAGIC):
+            return "skipped"
+
+        temporary_path = path + ".repair.tmp"
+        try:
+            try:
+                roots = rbxm_mesh.unwrap_instances(rbxm_mesh.read_model_bytes(data))
+            except Exception:
+                roots = None
+            if roots:
+                rbxm_mesh.write_model(roots, temporary_path)
+                outcome = "rewritten"
+            else:
+                rbxm_mesh.write_placeholder_model(temporary_path, stem)
+                outcome = "placeholder"
+            os.replace(temporary_path, path)
+            return outcome
+        except Exception:
+            try:
+                if os.path.exists(temporary_path):
+                    os.remove(temporary_path)
+            except OSError:
+                pass
+            try:
+                rbxm_mesh.write_placeholder_model(path, stem)
+                return "placeholder"
+            except Exception:
+                return "failed"
+
     def _scan_assets(self, output_dir):
         output_dir = os.path.abspath(output_dir)
         output_exclusion = os.path.dirname(output_dir)
@@ -3084,6 +3130,8 @@ class CacheAssetExtractionWorker(QThread):
             converted = 0
             conversion_failures = 0
             conversion_warning_reasons = set()
+            repaired_models = 0
+            placeholder_models = 0
             for index, (source_path, payload_offset, source_url, category, extension) in enumerate(assets, start=1):
                 if self.is_cancelled:
                     break
@@ -3111,6 +3159,12 @@ class CacheAssetExtractionWorker(QThread):
                             output_name = f"{sequence_number:05d}.{extension}"
                         output_path = os.path.join(category_dir, output_name)
                     os.replace(temporary_path, output_path)
+                    if extension in ("rbxm", "rbxl"):
+                        model_outcome = self._repair_model_file(output_path)
+                        if model_outcome == "rewritten":
+                            repaired_models += 1
+                        elif model_outcome == "placeholder":
+                            placeholder_models += 1
                     processed += 1
                     manifest_rows = [(sequence_number, category, output_path)]
 
@@ -3199,6 +3253,13 @@ class CacheAssetExtractionWorker(QThread):
                 finally:
                     sequence_number += 1
                     self.progressUpdated.emit(index, len(assets))
+
+            if repaired_models or placeholder_models:
+                self.logMessage.emit(
+                    f"Rebuilt {repaired_models} model file(s) for Roblox Studio; "
+                    f"{placeholder_models} unreadable payload(s) were exported as a placeholder instance.",
+                    "info",
+                )
 
             self.finished.emit({
                 "success": True,
